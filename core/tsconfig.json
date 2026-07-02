@@ -1,0 +1,17 @@
+{
+	"compilerOptions": {
+		"target": "esnext",
+		"lib": ["DOM", "ESNext"],
+		"module": "ESNext",
+		"noEmit": true,
+		"isolatedModules": true,
+		"resolveJsonModule": true,
+		"moduleResolution": "bundler",
+		"allowImportingTsExtensions": true,
+		"jsx": "react-jsx",
+		"jsxImportSource": "jsx-dom",
+		"strict": true,
+		// todo:
+		"types": ["howler", "vite/client"]
+	}
+}

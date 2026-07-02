@@ -1,0 +1,110 @@
+* {
+	margin: 0;
+	padding: 0;
+}
+
+html {
+	height: 101%;
+	font-family: Arial, Helvetica, sans-serif;
+	background-color: #2e3031;
+}
+
+body {
+	font-size: 62.5%;
+	font-family: Helvetica, Arial, sans-serif;
+	line-height: 10%;
+}
+
+a {
+	color: #3c86b7;
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+}
+
+ul {
+	line-height: 120%;
+}
+
+h1 {
+	font-family: Helvetica, Arial, Verdana, sans-serif;
+	color: #444;
+	font-weight: bold;
+	font-size: 1.7em;
+	line-height: 2em;
+}
+
+#content {
+	display: block;
+	width: 820px;
+	margin: 0 auto;
+}
+
+#left {
+	display: block;
+	width: 560px;
+	float: left;
+	margin-right: 20px;
+}
+
+nav {
+	width: auto;
+	background-color: white;
+	height: 45px;
+	margin-bottom: 20px;
+	box-shadow: inset 0 -5px #e0e0e0;
+}
+
+ul#n {
+	width: 850px;
+	margin: 0 auto;
+	display: block;
+	list-style: none;
+}
+
+ul#n li {
+	float: left;
+	line-height: 45px;
+}
+
+ul#n li a {
+	display: block;
+	padding: 0 11px;
+	color: #969696;
+	font-size: 15px;
+	font-weight: bold;
+	text-shadow: 0px 1px 1px #fff;
+}
+
+ul#n li.sel {
+	background: #76b3e3;
+	box-shadow: inset 0 -5px #4094d9;
+}
+
+ul#n li.sel a {
+	color: #fff;
+	text-shadow: none;
+}
+
+.clearfix:after {
+	content: ".";
+	display: block;
+	clear: both;
+	visibility: hidden;
+	line-height: 0;
+	height: 0;
+}
+
+.clearfix {
+	display: inline-block;
+}
+
+html[xmlns] .clearfix {
+	display: block;
+}
+
+* html .clearfix {
+	height: 1%;
+}

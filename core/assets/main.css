@@ -1,0 +1,756 @@
+@font-face {
+	font-family: "mainFont";
+	font-size: 8px;
+	src: url("./font2.ttf");
+}
+
+:root {
+	--white: #fff;
+	--gray: #2e3031;
+	--blue: #5151d9;
+	--red: #d95151;
+	--setting-blue: #76b3e3;
+	--setting-active-blue: #6fa9d6;
+}
+
+* {
+	font-family: "mainFont";
+	font-size: 12px;
+	image-rendering: pixelated;
+}
+
+html,
+body {
+	background-color: var(--gray);
+	overflow: hidden;
+	width: 100%;
+	height: 100%;
+	margin: 0;
+	padding: 0;
+}
+
+a {
+	text-decoration: none;
+}
+
+a:link {
+	color: var(--blue);
+}
+
+b {
+	color: rgba(0, 0, 0, 0.6);
+}
+
+h2 {
+	font-size: 14px;
+	color: rgba(0, 0, 0, 0.6);
+}
+
+h3 {
+	font-size: 16px;
+	color: var(--gray);
+	margin-top: 10px;
+	margin-bottom: 5px;
+}
+
+.menuHeaderTabbed {
+	margin-top: 0px;
+	margin-bottom: 10px;
+}
+
+.menuHeaderTabbed2 {
+	margin-top: 0px;
+	margin-bottom: 3px;
+}
+
+canvas {
+	cursor:
+		url("./cursor_aim.png") 17 17,
+		default;
+	width: 100% !important;
+	height: 100% !important;
+	margin: 0;
+	padding: 0;
+	-webkit-touch-callout: none;
+	-webkit-user-select: none;
+	user-select: none;
+	outline: none;
+	-webkit-tap-highlight-color: rgba(255, 255, 255, 0);
+	image-rendering: pixelated;
+}
+
+div {
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+.infoPopup {
+	position: absolute;
+	display: none;
+	background: var(--white);
+	border: 1px solid;
+}
+
+.mapVoteImage {
+	float: left;
+	padding: 10px;
+	height: 50px;
+	width: 50px;
+	vertical-align: middle;
+	image-rendering: pixelated;
+}
+
+.modeVoteText {
+	float: left;
+	height: 100%;
+	vertical-align: middle;
+}
+
+#statContainer2 {
+	top: 10px;
+	left: 10px;
+	pointer-events: none;
+	position: absolute;
+}
+
+#gameModeText {
+	font-size: 14px;
+	padding: 10px;
+	position: relative;
+	width: 200px;
+	top: 10px;
+	color: #ffd100;
+}
+
+.hatDisplayImage,
+.shirtDisplayImage,
+.camoDisplayImage {
+	float: left;
+	margin-top: 10px;
+	margin-right: 10px;
+	width: 62px;
+	height: 62px;
+}
+
+.hatDisplayImage {
+	background: url("./hats/display.png");
+	background-size: 62px 62px;
+	background-repeat: no-repeat;
+}
+
+.shirtDisplayImage {
+	background: url("./shirts/display.png");
+	background-size: 62px 62px;
+	background-repeat: no-repeat;
+}
+
+.camoDisplayImage {
+	object-fit: cover;
+}
+
+.sprayDisplayImage {
+	width: 100%;
+	height: 100%;
+	opacity: 0.95;
+	image-rendering: pixelated;
+}
+
+.hoverTooltip {
+	width: 250px;
+	display: none;
+	position: absolute;
+	padding: 15px;
+	margin-left: 20px;
+	font-size: 12px;
+	text-align: left;
+	top: 0px;
+	left: 100%;
+	color: var(--white);
+	background-color: rgba(0, 0, 0, 0.7);
+	/* TODO: this cannot work for the select hat/shirt/spray lists because the absolute
+	 * positioned element is hidden by the container with hidden overflow-x.
+	 * It shows if the hoverTooltip is taken out of the hatSelectItem element,
+	 * at the cost of the tooltip position not being relative to said element anymore... */
+	z-index: 100;
+}
+
+#rankProgressCont {
+	margin-right: 10px;
+	margin-top: 5px;
+	margin-bottom: 5px;
+	background-color: rgba(0, 0, 0, 0.5);
+	padding: 5px;
+}
+
+#rankProgress {
+	background-color: white;
+	width: 0;
+	height: 10px;
+}
+
+#chatbox {
+	position: absolute;
+	bottom: 15px;
+	left: 10px;
+	pointer-events: none;
+}
+
+#teamProgress {
+	position: relative;
+	width: 200px;
+	height: 55px;
+	background: rgba(0, 0, 0, 0.2);
+	top: 10px;
+	border-collapse: separate;
+	border-spacing: 10px 5px;
+}
+
+#progressC {
+	width: 100%;
+	height: 12px;
+}
+
+#progressbar {
+	background: rgba(0, 0, 0, 0.1);
+	height: 12px;
+}
+
+#redProgress {
+	width: 0px;
+	height: 12px;
+	background: var(--red);
+}
+
+#redText {
+	color: var(--red);
+	font-size: 14px;
+	white-space: nowrap;
+}
+
+#blueProgress {
+	width: 0px;
+	height: 12px;
+	background: var(--blue);
+}
+
+#blueText {
+	color: var(--blue);
+	font-size: 14px;
+	white-space: nowrap;
+}
+
+#map {
+	position: relative;
+	width: 200px;
+	height: 200px;
+	background: rgba(0, 0, 0, 0.2);
+}
+
+#statContainer3 {
+	pointer-events: none;
+	position: absolute;
+	top: 10px;
+	right: 10px;
+	text-align: right;
+}
+
+#conStatContainer {
+	pointer-events: none;
+	position: absolute;
+	left: 210px;
+	padding: 10px;
+	color: white;
+	text-align: center;
+}
+
+.gameDevStat {
+	background: rgba(0, 0, 0, 0.1);
+	padding: 10px;
+	margin-bottom: 10px;
+}
+
+#status {
+	text-align: center;
+	padding: 10px;
+	background: rgba(0, 0, 0, 0.1);
+	color: rgba(255, 255, 255, 0.7);
+	font-size: 15px;
+	position: relative;
+	white-space: nowrap;
+	overflow: hidden;
+	max-width: 350px;
+	text-overflow: ellipsis;
+}
+
+#status .title {
+	font-size: 23px;
+	color: rgba(255, 255, 255, 1);
+}
+
+#status .me {
+	color: var(--white);
+	font-size: 15px;
+}
+
+#status .blue {
+	color: var(--blue);
+	font-size: 15px;
+}
+
+#status .red {
+	color: var(--red);
+	font-size: 15px;
+}
+
+#scoreHolder {
+	top: 10px;
+	position: relative;
+	display: inline-block;
+}
+
+#score {
+	float: right;
+	padding: 10px;
+	background: rgba(0, 0, 0, 0.1);
+	color: rgba(255, 255, 255, 0.7);
+	font-size: 18px;
+}
+
+#scoreValue {
+	color: rgba(255, 255, 255, 1);
+	font-size: 18px;
+}
+
+#scoreText {
+	font-size: 18px;
+}
+
+#statContainer {
+	bottom: 15px;
+	right: 10px;
+	pointer-events: none;
+	position: absolute;
+	display: inline-block;
+}
+
+#actionBar {
+	bottom: 74px;
+	right: 10px;
+	pointer-events: none;
+	position: absolute;
+	display: inline-block;
+}
+
+#health {
+	padding: 10px;
+	background: rgba(0, 0, 0, 0.1);
+	float: right;
+	text-align: center;
+	font-size: 18px;
+	color: rgba(255, 255, 255, 0.7);
+}
+
+#healthValue {
+	color: rgba(255, 255, 255, 1);
+	font-size: 18px;
+}
+
+#healthText {
+	font-size: 18px;
+}
+
+#ammo {
+	padding: 10px;
+	background: rgba(0, 0, 0, 0.1);
+	margin-right: 10px;
+	float: left;
+	text-align: center;
+	pointer-events: none;
+	font-size: 18px;
+	color: rgba(255, 255, 255, 0.7);
+}
+
+#ammoValue {
+	color: rgba(255, 255, 255, 1);
+	font-size: 18px;
+}
+
+#ammoText {
+	font-size: 18px;
+}
+
+#startMenu p {
+	padding: 0;
+	text-align: center;
+	font-size: 16px;
+	color: var(--gray);
+	margin-top: 0px;
+	margin-bottom: 10px;
+}
+
+.menuTextInput {
+	width: 100%;
+	padding: 5px;
+	border: solid 1px #dcdcdc;
+	transition:
+		box-shadow 0.3s,
+		border 0.3s;
+	box-sizing: border-box;
+	border-radius: 1px;
+	outline: none;
+	font-size: 12px;
+}
+
+.hatSelectItem {
+	font-size: 12px;
+	padding: 5px;
+	cursor: pointer;
+	position: relative;
+}
+
+.hatSelectItem:hover > .hoverTooltip {
+	display: block;
+}
+
+.hatSelectItem:hover {
+	background: rgba(0, 0, 0, 0.1);
+	font-size: 14px;
+}
+
+.rewardText:hover > .hoverTooltip {
+	display: block;
+}
+
+/* button:disabled {
+	filter: brightness(0.9);
+	cursor: not-allowed !important;
+} */
+
+#settingsButton {
+	cursor: pointer;
+	position: relative;
+	margin: auto;
+	margin-top: 10px;
+	width: 100%;
+	height: 41px;
+	box-sizing: border-box;
+	text-align: center;
+	text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+	background: var(--setting-blue);
+	border: 0;
+	box-shadow: inset 0 -3px var(--setting-active-blue);
+	border-radius: 1px;
+	margin-bottom: 10px;
+	font-size: 15px;
+	color: rgba(255, 255, 255, 1);
+}
+
+#settingsButton:active,
+#settingsButton:hover {
+	top: 1px;
+	background: var(--setting-active-blue);
+	outline: none;
+	box-shadow: none;
+	font-size: 17px;
+}
+
+#settings,
+#leaderboardWrapper {
+	transition: max-height 0.2s;
+	overflow: hidden;
+}
+
+#rnkMessage {
+	padding: 0px;
+	max-height: 0;
+	transition: max-height 0.1s;
+	overflow: hidden;
+}
+
+#likeButton {
+	position: relative;
+	top: -4px;
+}
+
+#leaderboardWrapper {
+	max-height: 0;
+	overflow-y: scroll;
+	color: rgba(0, 0, 0, 0.3);
+	line-height: 220%;
+}
+
+.smallMenuButton {
+	cursor: pointer;
+	position: relative;
+	margin: auto;
+	box-sizing: border-box;
+	text-align: center;
+	text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+	background: var(--setting-blue);
+	border: 0;
+	padding: 6px;
+	box-shadow: inset 0 -3px var(--setting-active-blue);
+	border-radius: 1px;
+	margin-bottom: 10px;
+	font-size: 12px;
+	color: rgba(255, 255, 255, 1);
+}
+
+.smallMenuButton:active,
+.smallMenuButton:hover {
+	top: 1px;
+	background: var(--setting-active-blue);
+	outline: none;
+	box-shadow: none;
+}
+
+#startMenu ul {
+	margin-left: 10px;
+	margin-right: 10px;
+	margin-top: 0;
+	margin-bottom: 0px;
+	padding: 10px;
+	font-size: 14px;
+	color: rgba(0, 0, 0, 0.5);
+}
+
+.modeVoteButton {
+	cursor: pointer;
+	pointer-events: auto;
+	background: rgba(0, 0, 0, 0.15);
+	color: white;
+	margin: 8px;
+	font-size: 14px;
+	width: 28%;
+	display: inline-block;
+	text-align: center;
+	vertical-align: middle;
+	line-height: 36px;
+	border: 0;
+}
+
+.modeVoteButton:active {
+	background-color: rgba(255, 255, 255, 0.2);
+}
+
+.modeVoteButton:hover {
+	background-color: rgba(255, 255, 255, 0.1);
+}
+
+.modeVoteButtonA {
+	cursor: pointer;
+	pointer-events: auto;
+	background: rgba(255, 255, 255, 0.2);
+	color: white;
+	margin: 8px;
+	font-size: 14px;
+	width: 28%;
+	display: inline-block;
+	text-align: center;
+	vertical-align: middle;
+	line-height: 36px;
+	border: 0;
+}
+
+.modeVoteButtonA:active {
+	background-color: rgba(255, 255, 255, 0.25);
+}
+
+.modeVoteButtonA:hover {
+	background-color: rgba(255, 255, 255, 0.1);
+}
+
+#loadingWrapper {
+	background-color: var(--gray);
+	z-index: 99;
+	width: 100%;
+	height: 100%;
+	position: absolute;
+}
+#loadText {
+	color: var(--white);
+	text-align: center;
+	font-size: 20px;
+}
+.cs-loader-inner {
+	transform: translateY(-50%);
+	top: 50%;
+	position: absolute;
+	width: calc(100% - 200px);
+	color: var(--white);
+	padding: 0 100px;
+	text-align: center;
+}
+.cs-loader-inner label {
+	font-size: 20px;
+	padding: 5px;
+	opacity: 0;
+	display: inline-block;
+}
+
+@keyframes lol {
+	0% {
+		opacity: 0;
+		transform: translateX(-300px);
+	}
+	33% {
+		opacity: 1;
+		transform: translateX(0px);
+	}
+	66% {
+		opacity: 1;
+		transform: translateX(0px);
+	}
+	100% {
+		opacity: 0;
+		transform: translateX(300px);
+	}
+}
+.cs-loader-inner label:nth-child(4) {
+	animation: lol 3s 300ms infinite ease-in-out;
+}
+.cs-loader-inner label:nth-child(3) {
+	animation: lol 3s 400ms infinite ease-in-out;
+}
+.cs-loader-inner label:nth-child(2) {
+	animation: lol 3s 500ms infinite ease-in-out;
+}
+
+#escMenuWrapper {
+	display: none;
+	background: rgba(0, 0, 0, 0.5);
+	pointer-events: none;
+	z-index: 2;
+	width: 100%;
+	height: 100%;
+	position: absolute;
+}
+
+#startMenuWrapper {
+	pointer-events: none;
+	z-index: 2;
+	width: 1050px;
+	position: absolute;
+	top: 45%;
+	left: 50%;
+	margin-right: -50%;
+	transform: translate(-50%, -50%) scale(1);
+}
+
+#mobileMessage {
+	z-index: 5;
+	font-size: 18px;
+	text-align: center;
+	color: var(--white);
+	left: 0;
+	line-height: 200px;
+	margin: auto;
+	margin-top: -100px;
+	position: absolute;
+	top: 50%;
+	width: 100%;
+}
+
+#gameAreaWrapper {
+	position: absolute !important;
+	top: 0;
+	left: 0;
+}
+
+#mainTitleText {
+	width: 100%;
+	color: var(--white);
+	font-size: 96px;
+	text-align: center;
+	text-shadow:
+		0 1px 0 #e0e0e0,
+		0 2px 0 #e0e0e0,
+		0 3px 0 #e0e0e0,
+		0 4px 0 #e0e0e0,
+		0 5px 0 #e0e0e0,
+		0 6px 0 #e0e0e0;
+}
+
+#startMenu {
+	width: 30.5%;
+	padding: 20px;
+	float: none; /*left;*/
+	border-radius: 1px;
+	background-color: white;
+	box-sizing: border-box;
+	margin-bottom: 10px;
+	display: inline-block;
+	vertical-align: top;
+	pointer-events: auto;
+	box-shadow: inset 0 -5px #e0e0e0;
+}
+
+#roomWrapper {
+	width: 35.5%;
+	float: left;
+	margin-bottom: 10px;
+	margin-right: 10px;
+	padding: 20px;
+	border-radius: 1px;
+	vertical-align: top;
+	background-color: white;
+	box-sizing: border-box;
+	pointer-events: auto;
+	box-shadow: inset 0 -5px #e0e0e0;
+}
+
+#rightMenu {
+	width: 32%;
+	float: right;
+	margin-left: 10px;
+	padding: 20px;
+	border-radius: 1px;
+	vertical-align: top;
+	background-color: white;
+	box-sizing: border-box;
+	font-size: 16px;
+	color: rgba(0, 0, 0, 0.4);
+	pointer-events: auto;
+	box-shadow: inset 0 -5px #e0e0e0;
+}
+
+#linkBoxRight {
+	font-size: 14px;
+	color: var(--gray);
+	z-index: 1000;
+	position: absolute;
+	bottom: 0;
+	right: 0;
+	background-color: var(--white);
+	border-radius: 1px 0px 0px 0px;
+	padding: 5px 10px;
+	box-sizing: border-box;
+	text-align: center;
+}
+
+#linkBoxLeft {
+	font-size: 14px;
+	color: var(--gray);
+	z-index: 1000;
+	position: absolute;
+	bottom: 0;
+	left: 0;
+	background-color: var(--white);
+	border-radius: 0px 1px 0px 0px;
+	padding: 5px 10px;
+	box-sizing: border-box;
+	text-align: center;
+}
+
+.playerStatClick {
+	padding: 5px;
+	cursor: pointer !important;
+}
+
+.playerStatClick:hover {
+	background-color: #e6e6e6;
+}
+
+#clanRoster {
+	padding-left: 10px;
+}

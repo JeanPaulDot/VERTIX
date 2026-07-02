@@ -1,0 +1,19 @@
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1118:1118"
+      - "127.0.0.1:1119:1119"
+    volumes:
+      - ./data:/app/data
+    env_file: .env
+    environment:
+      - NODE_ENV=production
+      - DATA_DIR=/app/data
+    networks:
+      - vertix-net
+
+networks:
+  vertix-net:
+    external: true

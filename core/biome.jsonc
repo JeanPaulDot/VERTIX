@@ -1,0 +1,47 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.4.15/schema.json",
+	"root": false,
+	"extends": "//",
+	"linter": {
+		"rules": {
+			"style": {
+				"useConst": "off",
+				"noNonNullAssertion": "off"
+			},
+			"suspicious": {
+				// "noVar": "warn",
+				"noDoubleEquals": "info",
+				"noExplicitAny": "info"
+			},
+			"correctness": {
+				"noUnusedVariables": "info",
+				"useParseIntRadix": "off"
+			},
+			"a11y": "off"
+		}
+	},
+	"formatter": {
+		"lineWidth": 100
+	},
+	"html": {
+		"formatter": {
+			"lineWidth": 120
+		}
+	},
+	"overrides": [
+		{
+			"includes": ["**/*.svelte"],
+			"linter": {
+				"rules": {
+					"correctness": {
+						"noUnusedVariables": "off",
+						"noUnusedImports": "off"
+					},
+					"suspicious": {
+						"noAssignInExpressions": "off"
+					}
+				}
+			}
+		}
+	]
+}

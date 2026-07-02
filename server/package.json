@@ -1,0 +1,23 @@
+{
+	"name": "server",
+	"version": "1.0.0",
+	"scripts": {
+		"dev": "node --watch --watch-preserve-output --import ./import-hooks.ts index.ts",
+		"start": "node --import ./import-hooks.ts index.ts"
+	},
+	"dependencies": {
+		"@hono/node-server": "^2.0.4",
+		"bcrypt": "^6.0.0",
+		"better-sqlite3": "^12.11.1",
+		"core": "workspace:*",
+		"hono": "^4.12.23",
+		"jose": "^6.2.3",
+		"sharp": "^0.34.5",
+		"socket.io": "^4.8.3"
+	},
+	"type": "module",
+	"devDependencies": {
+		"@types/bcrypt": "^6.0.0",
+		"@types/better-sqlite3": "^7.6.13"
+	}
+}

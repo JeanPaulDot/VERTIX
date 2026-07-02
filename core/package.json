@@ -1,0 +1,19 @@
+{
+	"name": "core",
+	"version": "1.0.0",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"preview": "vite preview"
+	},
+	"devDependencies": {
+		"@sveltejs/vite-plugin-svelte": "^7.1.2",
+		"@types/howler": "^2.2.13",
+		"@zip.js/zip.js": "^2.8.26",
+		"howler": "^2.2.4",
+		"jsx-dom": "^8.1.6",
+		"socket.io-client": "^4.8.3",
+		"vite": "^8.0.14"
+	},
+	"type": "module"
+}

@@ -1,0 +1,21 @@
+{
+	"version": "0.0.1",
+	"configurations": [
+		{
+			"name": "vertix",
+			"runtimeExecutable": "pnpm",
+			"runtimeArgs": ["dev"],
+			"port": 5173
+		},
+		{
+			"name": "vertix-prod",
+			"runtimeExecutable": "pwsh",
+			"runtimeArgs": [
+				"-NoProfile",
+				"-Command",
+				"$env:NODE_ENV='production'; node --import ./server/import-hooks.ts server/index.ts"
+			],
+			"port": 1118
+		}
+	]
+}

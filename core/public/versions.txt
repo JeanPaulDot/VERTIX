@@ -1,0 +1,724 @@
+
+Vertix Online - Version History
+The versions listed here are major released versions, some version wont appear, because
+the changes made were to small to warrant a separate update. This is just a summary, a lot
+of changes are not listed here.
+
+** NEXT ** (lol -gus)
+> TRADING
+> PANTS
+> NEW SHIRTS
+> NEW CAMOS
+
+V3.81 (FIXES)
+> Fixes
+
+V3.8
+> Increased Nademan AOE damage
+> Nerfed Duck HP
+
+V3.7
+> Removed Duck Hunt
+> Added Flame War Mode
+> Updated Game Sprites
+> Removed some of the bad Maps
+> Added new Maps
+> Added new Hats
+> Buffed Aronsit Damage to 11
+> Nademan no longer takes self damage
+> Buffed Duck Health
+> Buffed Triggerman Damage
+> Nerfed Detective Firerate
+> Removed Grenade from Triggerman
+> Optimized Server Stuff
+
+V3.6
+> Fixed issue with Ads
+> Updated discord link
+> Reinstalled Mudkip on Discord (it was broken for some reason)
+
+V3.5
+> (Im fixing the clan boost checker. It is broken atm)
+> Added several new shirts (80 total)
+> Nademan is now available without following
+> Added some new Rare Camos
+> Added some new sprays
+> Added new Zone war Map
+> Improved hit detection
+> Increased Minigunner Spread
+
+V3.4
+> Buffed Nademan
+> Warehouse Backend - (WIP)
+
+V3.3
+> Items now stack. So you can have multiple of the same item
+> Trading and Item Store Coming soon
+
+V3.2
+> Disabled Custom Maps for now. It was causing a lot of lag and crashes
+> Optimizations and Fixing server issues
+> Reduced CPU usage on server
+> Increased Triggerman Damage to 24
+> Increased Detective Firerate again slightly (Not as much as before)
+
+V3.1 - The Second Coming
+> Added very Basic Clan War Setting to Custom Servers: (You join teams with people in the same clan)
+> Improved Loot system: First place has much higher chance to get legendary items
+> Nerfed Detective Firerate
+> Buffed reload time for Nademan
+> Buffed Spray and Pray dmg slightly
+> Added 6 new Maps
+> Added ANTI Boosting control
+> Fixed custom Map Loader for Custom Servers
+> Updated all Mod File Paths in Mod Section
+> Updated More Mods URL in Mod Section
+
+V3.04
+> Addded all User Sprays from #sprays
+> Buffed Nademan again
+> Nerfed Detective Sligthly
+> Resized Sprays (Big Sprays caused a lot of lag)
+
+V3.03
+> Increased Nademan Ammo
+> Fixed Menu Loading Bug
+
+V3.02 - Just some stuff
+> Added Nademan class
+> Some bugs fixes on server side
+> Removed Play Store button
+
+V3.01 - Fixes
+> Fixed The Shirt Bug where you couldnt see other players shirts
+> Added Custom Map Upload to Private Lobbies
+> Added Loot Drops to Private Servers
+
+v3.0 - New Stuff
+> Reduced Download Size (This will increase load Times)
+> 50 new Camos
+> 1 new Legendary Hat
+> Added Several news Sprays (User Submitted)
+> Added Health packs to all FFA Maps
+> Added new Maps
+> Fixed Camo Names
+> Released Mobile Version
+> Added button and re-direct to Mobile Version
+> Added 5 new Sprays
+> Added 35 Unlockable Shirts
+> Added total Hats to the Profile Page
+
+v2.79 - Mobile Features and Balancing
+> Balanced some of the classes
+> Added Mobile Server Configs for Mobile Versions
+> A strange looking chicken appeared in the class menu
+> Added Duck Hunt Mode
+> Improved Page Load Speed
+> Made Duck Faster
+> Increased Blast radius for Rocketeer
+> Mobile Version is coming very soon now
+
+v2.78 - Fixes and New Content
+> Fixed Reload Issue (Finally)
+> Fixed flames behind walls issue
+> Added Bullet Trails back in (+Setting to disable them)
+
+v2.77 - Bandwidth Reduction
+> Greatly reduced initial download Size
+> Compressed game state data further
+> Added setting to Hide UI
+> Fixed 'Logging In...' Bug
+> Fixed Bugs with Camo Selection
+> Added simple Rank Up Message
+> Fixed Account Bug when joining Server
+> Adjusted Room joining to be more balanced (Round Robin)
+
+v2.76 - Fixes
+> Changed Room Size from 3v3 to 4v4
+> Fixed Mod Links yet again...
+> Added Error Logs to Client (Please check the console if you time out)
+> Updated Node Version on Server
+> Added Share Options to menu
+
+v2.75 - Balancing and Fixes
+> Fixed Mod Links
+> Re-Balanced Arsonist
+> Fixed Clan Spray Resolutions
+> Fixed Drop Rates (Rarity Bug)
+> Fixed Issue where you have to Re-login to activate clan tag
+> Adjusted Zone War Kill Score and Required Score to Win
+
+v2.74 - Fixes and Content
+> Changed mode vote Rotation
+> Highlighting Vote/Nice Buttons
+> Fixed Character Rendering
+> Fixed Nice Button
+> Increased Range for Arsonist
+> Made flames bounce off walls
+> Made flame Sprite Moddable
+> Changed flame color
+
+v2.73 - New Stuff
+> Fixed Vince Bullet issue
+> Added 2 new Maps
+> Added new Sprays
+> Fixed Exploit
+> Added Youtube Channel
+> Bug Fixes
+
+v2.72 - Fixes and User Content
+> Fixed the Cake Hat
+> Fixed Position Loading issue
+> Added new Sprays
+> Added new Hats
+> Adjusted Spray N' Pray
+> Added Temporary Clan Chat link to Clan Page (Admins can make a discord and link it on the Clan Page)
+> Fixed Time Out Issue (Sorry about this one)
+
+v2.71 - Rank Algorithms
+> Prevented Boosters from having a high rank
+> Increased Clan join requirements to rank 5 and create requirement to rank 10
+> Increased Damage of Spray N' Pray
+> Removed Maze Map
+> Added new Hats
+> Removed account data from local storage
+
+v2.7 - New Features & Improvements
+> Added FPS Display and Setting to Hide/Show FPS & Ping
+> Added 5 New Maps
+> Added Featured Mod List (Much easier to Load mods)
+> Added Clan Leaderboards (KDR & LEVEL)
+  (They will update once one of your clan members signs in to their account)
+> Added new Character Sprites for some Classes
+> Added 1 New Class: and Spray N' Pray (Pyroman and Brawler Delayed)
+> Added 25 new Camos
+> Added 22 new Hats
+> Added 25 new Masks
+> Added 4 new Sprays
+> Added Clutter around Objectives
+> Added Flame Wars Game Mode
+> Added Zone War Gamemode (Enter the enemy Zone to Score a Goal)
+> Added Pyro Wars Game Mode
+> Added Enter Button to Login
+> Added local storage
+> Added Objective Display to Minimap
+> Added Flag Colors based on Team/Objective
+> Added Goals Display on Final Leaderboard for Zone War
+> Added new Mobile Message
+> Boss Weapon Rockets are now Based on the Mouse Distance (Gives your more control)
+> Boss can now Jump a Little bit
+> Changed rank algorithm to take KDR into account. (But only once 1000 Kills are reached)
+> Changed clan Rank Algorithm as well
+> Fixed Leadeboard Bug
+> Fixed Issues with Weapon Sprite Rotation
+> Fixed Class Loader Bug
+> Fixed Camo Saving Bug
+> Fixed Bug with Bullet Penetration
+> Fixed Spawn Flashing Bug
+> Fixed Jumping Bug
+> Fixed Some display and Image Loading Bugs
+> Fixed Chat Invisible Bug
+> Fixed Ping Calculation
+> Fixed Weapon Sprite Issue when Loading Mods
+> Increased Points recived from Hardpoint
+> Increased Notification Text Time
+> Made Class selector Scrollable
+> Made Leaderboards Linkable: (vertix.io/leaderboards.html#rank or kdr etc)
+> Optimized Download Size of Game Res Package
+
+v2.68 - Fixes & Optimizations
+> Fixed FPS Selector Issue
+> Fixed Jitter
+> Fixed Duplicate Sprays
+
+v2.65 - Features and Improvements
+> Improved ambient occlusion
+> Added basic Loading Display
+> Added another KDR Leaderboard (1000 Kills requirement)
+> Added 5 New Camos
+> Optimized Shadow Rendering
+> Fixed Mod Loading Issues
+> Increased Item drop rate for better players
+> Increased Bullet Speed
+> (WIP) Added Bullet Bloom/Glow (Bloom can be disabled in your mod by making the lighting.png image blank)
+> Added Light Flash for Explosions
+> Added Setting for Bloom
+> Reset bullet spread on Reload (This allows you to control the Spread a bit)
+> Increased Run N' Gun Movement Speed
+> Fixed Logout Issues
+> Added Secret Setting: Migraine (This will give you a Migraine)
+> Fixed Issues with Peru & Poland Hats
+> Changed Rank Algorithm (KDR No longer affects your Level)
+> Reduced Download Size
+> Added Kills Leaderboard
+> Added new Spray
+> Adjusted Bullet Net Code
+> Added Rocket War Mode
+> Made certain Maps works for multiple Modes
+> Optimizations
+> Increased Vinces Damage and Move Speed
+> Fixed Spray Issues
+
+v2.6 - Key Bindings
+> Added Key Bindings (Custom Controls. Not finished)
+> Fixed Menu Scaling Issue
+> Added Display for Total unlocked Camos
+> Added Connection Pooling for Database
+> Added 2 New Sprays
+> Fixed Menu Display Bug
+> Fixed Database Issue (Moving to different DB)
+> Added Reset to Default Key Binding
+> Fixed Chat Bug
+> Minor Layout fixes in main Menu
+> Fixed Mouse Down performance Issue
+> Bug Fixes
+> Performance Fix
+> Added 20 More Camos
+> Added Kill Log to Chat
+> Improved Login Query
+> Added weapon skin saving
+> Added Mod Loading from Custom URL (No longer restricted to Dropbox Keys but they still work)
+> Fixed Bullet Spread Bug
+> Added some new Hats/Masks
+> Added further Spam prevention to chat
+> Removed kill notifications from chat
+> Added Old Kill notifications back
+> Fixed Mod Loader Bug
+
+v2.5 - More Regions and Fixes
+> Added Servers in Frankfurt (EU), and Singapore (Asia Pacific):
+> Added Spray for Pyro Clan
+> Buffed Run N' Gun (Reload Speed and Damage)
+> Reduced Run N' Gun Ammo by 2
+> Med-Packs only picked up when Health is less than Max
+> Added different resolutions for certain Sprays
+> Reduced Minimap FPS (Optimization. It doesn't need to be 30FPS)
+> Show Duplicate Text when a Duplicate item is awarded
+> Fixed Name capitalization
+> Added KD Leaderboard to Vertix Social Page
+> Added 40 Weapon Camos for Each Weapon
+> Fixed Several Bugs
+> Fixed Pyro Spray
+> Fixed Emailer Service (For Account Recovery)
+> Fixed Bug with Map Creation
+> Minor Fixes to spawning system
+> Increased jumping Cooldown
+> Updated Mod Folder (Scripts)
+> Fixed Stat Page Issue
+> Fixed several Exploits
+> Fixed Spelling for Colombia hat
+> Fixed Issue with Clans
+> Fixed Bullet Sprite issue for Mods
+> Added Black Ops Camo
+> Fixed UI issue
+
+v2.4 - Private Lobbies
+> Added Private Lobbies for Clan Battles and 1v1s (More Settings Coming Soon)
+> Fixed Vertix Social
+> Increased Rocketeer Explosion Radius Slightly
+> Reduced Rocketeer Firerate and Damage Slightly
+> Reduced Detective Ammo to 6
+> Now Showing: No Reward instead of showing duplicate hats
+> Removed Assist Damage from Friendly Fire
+> Cancel Assist on Death
+> Changed Map Randomization algorithm
+> Improved Lobby Joining algorithm
+> Added Password Protection to Private Servers
+> Fixed a Bug with Lobby Logic
+> Fixed Shooting issue when Spawning
+> Added New Spray for Master Gaming Channel
+> Increased Private Server Limit
+> Fixed Server Creation Bug
+> Disabled Stats in Private Lobbies
+> Made IP text selectable
+> Added new Spray
+> Fixed Bug with Map loader
+> Added 2 new Maps
+> Made ground Darker
+> Fixed Bug with Kill counter
+> Added speed setting to Custom Server
+> Slightly decreased bullet speed
+> Minor Graphical Changes
+
+v2.3 - Features and Fixes
+> Fixed Argentina Spelling
+> Change Leaderboard Key to both Shift & T
+> Show total kills and deaths on profile page
+> SHowing KD in Clan Roster
+> Added More Hats. For a total of 72 Unlockable Hats
+> Made Points for Kills Percentage Based (This fixes the Kill stealing issue)
+> Fixed Default Spray Loader
+> Enabled Profanity Filter by Default
+> Made how to Play Scrollable
+
+v2.2 - Some Fixes
+> Temporary fix for Bullets and Interpolation (Not 100%)
+> Changed to use Email for Account Recovery (Emailer Broken. I'm fixing it.)
+> Fixed the Stationary Players Bug
+> Added setting for Chat Selection
+> Added Player Info Page when clicking on a players name
+> Added Basic Version of Vertix Social
+> Changed Leaderboard Key from Shift to T
+> Made Names on Statboard Clickable (Links to Profile)
+> Added Share Button to Profiles
+> Fixed io is undefined Error (SSL Issue)
+> Show Rank on Leaderboard
+> Added ability to Changed Username
+> Added youtube channels to accounts. This will allow people to subscribe to you
+  from your vertix profile page.
+
+v2.1 - Improvements and New Features
+> Added Client Interpolation
+> Reduced Ping/Latency
+> Adjusted Bullet Accuracy (Netcode still not Perfect)
+> Added Team Only Chat Option (Button to the Right of Chat Box)
+> Major Bandwidth Optimizations
+> Changed font to Vertix Classic (Has Lowercase Letters)
+> Made Settings Scrollable (This makes it easier to read them)
+> Fixed Jumping Bug
+> Showing Total Number of Hats in Hat Menu
+> Changed Wall and Ground Textures slightly
+> Disabled perMessageDeflate on WebSockets
+> Setup proper Routing
+> Rendering Optimization (FPS Boost)
+> Optimized Bullet Collisions
+> Added Interpolation value to Bullet State
+> Added 3 New Sprays
+> Interpolating Position On Server during Bullet State
+> Fixed Sound Effects Issue on Mods
+
+v2.0 - Fixes and New Stuff
+> Added XP Bar to account tab
+> Added Hat Display when hovering on a Hat Item (Still need to add this for the list)
+> Re-Balanced Run N' Gun Class Slightly
+> General Bug Fixes
+> Fixed Med-Pack spray
+> Added 5 New Maps
+> Added More Flag Sprays
+> Updated Small Lootcrate Map
+> Updated new Hardpoint Map
+> Updated Socket.io Version (Probably moving away from websockets soon)
+> Added Compression to Reduce Bandwidth
+> Fixed Issue with End Game Leaderboard
+> Added Setting to Hide/Show in Game Leaderboard
+> Added Team Deathmatch Mode
+> Changed Hardpoint Map Again
+> Add Varying Spawns
+> Show Spray on Hover
+> Minor Bandwidth Optimizations
+
+v1.9 - Lobbies
+> Added a basic Lobby system (This is difficult to test on my own, so it may still have some bugs)
+> Fixed some Bugs in lobby system (Still not perfect)
+> Bullets no longer hit friendly players
+> Replaced Dr. Beak with Billy The Kid
+> Increase Duration of Lootcrate Mode
+> Buffed Billy The Kid
+> Made Rocketeer Rockets Distance Based. So you have more control
+> Increased Triggermans Accuracy
+> Changed Spray System
+> Included some Country Flags as Default Sprays
+> Upgraded Database Server to Server Cluster. This will increase the Speed and
+  makes the DB more reliable.
+> Fixed some Bugs with Lobby System
+> Increased Textshadow Size for Dmg Numbers
+
+v1.8 - New Content and Fixes
+> Added proper error messages for Mod Loading (Check Console)
+> Change CharInfo.txt structure
+> Major Rendering Optimization (Should increase performance)
+> Fixed Rendering Bug where shadows disappear at the top of the screen
+> Fixed Chatbox Selection Bug
+> Fixed Walking Particle Bug
+> Added Hover animation to all Buttons
+> Reduced opacity of hover color
+
+v1.7 - New Content and Balancing
+> Decreased Hunter HP (ROCKETEER NOW A GOOD COUNTER TO HUNTER)
+> 40+ New Hats to Unlock
+> Fixed Nice Button on Leaderboard
+> General Bug Fixes
+> Fixed Hats so Boss can Wear them Too
+> Fixed Leaderboard Bug when Game Ends (May still have some minor Issues)
+> Added Hover Information for each Hat/Item
+> Added Automatic Selection of previously selected class and hat
+> Increased Hat Drop odds for First Place
+> Added Character Descriptions
+> Changed Character Selection so it works in all Browsers
+> Added new CharInfo.txt to the mod folder
+> Added Hat info on Hover in the Menu
+> Fixed Typo in Hunter Description
+> Last spray now automatically loads
+> Added ability to Kick clan Members
+> Changed Menu Button Hover Animation
+> Added new Sniper War Map
+> Fixed Bug where you sometimes lose a hat youve unlocked
+
+v1.6 - New Content Update
+> Added Hat Loot system. (At the end of each game you earn a random hat based on your performance)
+> (More Hats will be added every update)
+> Buffed Boss
+> Changed so Terminology in the Privacy Policy
+> Increased Pistol Firerate
+> Reduced Healing amounts to Actual amounts instead of
+  always showing 100.
+> Removed Right-Click on Game Canvas
+> (WIP) Extended Functionality of GameInfo.txt Script
+> Removed Featured Mods list due to Direct links becoming unavailable
+> Removed Default FPS Setting
+> Fixed Bug with Mod Loader
+> Separated the Hair of characters to new file.
+> Increased Points from Lootcrate to 100
+> (WIP) Added Client Interpolation: This smoothes out the movement of other players.
+> Added some Goofs for certain Accounts
+
+v1.5 - New Features and Fixes
+> Added basic lobby system
+> Optimized Client Side Performance
+> Fix Graphical Tile Bug
+> Updated most of the Maps
+> Increased Boss Bullet Dmg
+> Reduced Surgeon Self Heal
+> Changed FOV a bit
+> Fixed Password Recovery
+> Fixed Lobby Text Select
+> Added Discord to Community Tab
+> Animated DMG Numbers
+> Added White Retro Flash when you get Hit
+> Fixed Team Balancing Issue
+> Fixed Corner Tile Visual Bug
+> Showing Clan Names on Leaderboard
+> Increased Vinces Damage
+> Added Team Healing Back to Surgeon
+> Increased Surgeon Healing
+> Added Custom Sprays
+> Added Spray Setting
+> Removed length restriction on Menu Header
+> Optimized Sprays
+> Sprays now Stay when you die
+> Pixelated Sprays to "Prevent" profanity
+> Reduced Vince Damage
+> Increased Surgeon Damage
+> Reduced Surgeon Healing
+> Removed Text Selection from Chat
+> Fixed Privacy.txt
+
+v1.4 - Accounts and Stats
+> Added Integrated Login System
+> Added Basic Account stats: Kills, Deaths, KD
+> Added World Ranking Stat
+> Added Player Rank/Level
+> Added XP progress to Stats
+> Added Likes Stat
+> Added auto Fill for Userame when Logged in
+> Added Logout Button
+> Added Recover Button for Lost Account Details
+> Updated Mod Folder with Latest Files
+> Fixed Pistol Sound in Mod Folder
+> Changed Lootcrate Map1 Size
+> Optimizations
+> Removed Mod Ads for now. (Due to Policy Issue)
+> Added Clan Inviting
+> Added Clan Creation
+> Added Clan Joining
+> Clan Create Requirement: Level 5
+> Clan Join Requirement: Level 2
+> Changed Rank and Level Calculation to: Score * (KD / 10)
+> KD no longer affected by Boss Hunt Mode
+> Encrypted Sensitive Database Information
+> Added Privacy Policy
+
+V1.3 - Fixes
+> Fixed Grenade Damage
+> Fixed Jumping Bug
+> Improved Bullet Accuracy on Lower Ping
+> Optimized Performance
+> Optimized Bullets
+
+V1.2 - Performance Update & Balancing
+> Game can now run at 60FPS
+> Added FPS Setting
+> Boosted Performance by A lot
+> Removed animated Ads to Increase Performance
+> Performance Optimized
+> Damage to Boss is based on number of people in room
+
+V1.1 - Graphics Update
+> Added Pre-Baked Ambient Occlusion
+> Changed Floor, Wall and Ceiling Sprites
+> Added some basic Lighting Effects
+> Explosion Decals
+> Particle Fade Effect
+> Proper Spawning System. No longer random.
+> Small Bug Fixes
+
+V1.0 - New Modes and More
+> Added new Boss Mode
+> Added ability to Vote on next Gamemode
+> Added Sniper Game Mode
+> Added Pistol to Sniper
+> Fixed Room Bug where 7 Players could be in 1 Room
+> Made it so that it will always try to put you into a room with other players
+> Optimized CPU on server
+> Changed rooms to be Dynamically Deleted and Added
+> General Optimizations
+> Menu UI looks a lot sharper now
+> Removed Convict
+
+V0.99 - New Weapon and More
+> Added the ability to Hold More Weapons
+> Added Grenade Launcher to some classes (Each class with have their own special)
+> Added Rocketeer Class
+> Added Pistol to Rocketeer and Hunter
+> Changed the way Weapons are Rendered
+> Updated In-Game UI for multiple weapons
+> Updated How to Play description
+> Barrels now explode if they touch another explosion
+> Hunter ammo decreased but firerate increased
+> Hunter Health increased to 50
+> Dr. Beak Damage increased to 25
+> Dr. Beak Healing increased to 10
+> Changed Map 7 (Map with Plus in Middle)
+> Removed Ability to Like your own Stats
+> Added ability to Mod the Game Title
+> Added GameInfo script to mod Folder
+> CHanged Mod ads to a JSON object
+
+
+V0.98 - Several Changes
+> Removed Direcional Shooting
+> Added Sound Modding
+> Showing Client Ping Next to Map
+> Added Fading Soundtracks
+> Can now show Scoreboard during game by pressing Shift
+> Removed Whitespaces from Names
+> Re-Balancing on Damage and Firerates
+> Dr. Beak Restores 5 Health on Damage
+> Increased Dr Beak HP to 100
+> Added Reload back In
+> Added Explosive Barrels to Map
+> Disabled Sub-Pixel Rendering for Performance Boost
+> General Optimizations
+> Bullet Collisions are Now Pixel Perfect
+> Decreased Hunter Health to 40 (Now dies from 2 hits by any gun)
+> Increased Damage of Triggerman to 20
+> Optimized Particle Effects
+> Optimized Rendering and Object Generation
+> Reduced Bullet Speed a Bit
+> Fixed Bullet Wall Bug when you Jump into Wall
+> Always Rendering Names on Top of Walls
+> Fixed -1 Voting Bug
+> Fixed Suicide Score Bug
+> Fixed Leaderboard Max Width
+> Fixed Game Over Movement Bug
+> Added Team Kill Message
+> Fixed Anim Index on Game Over Screen
+
+V0.97 - Clutter Update
+> Added more Clutter to Map
+> Added blood Stains when shooting enemy
+> Fixed Bug with Directional Shooting
+
+V0.96 - Weapon Update
+> Added 3 Dimensional Bullet Spread
+> Added Directional Shooting
+> Added Screenshake to Guns
+> Adjusted Gun Firerates and Spread
+
+V0.95 - Network Update 2
+> Updated Netcode to be more accurate
+> Increased Bullet Speed
+> Added unique bullet trails to all guns
+> Differenet bullet sizes for each gun
+> Slowed Movement a little
+> Removed Spikes :(
+
+V0.94 - Spikes Update
+> Added Spikes to Map
+
+V0.93 - Menu and Network Update
+> Updated Main Menu
+> New Font if You want to still use the classic font, you can make a mod that uses said font
+> Fixed Jumping Bug where you can jump after moving
+> Fixed Speed Hack Exploit
+> Fixed CLient Side Bullet calculations
+> Optimized asset loading so page loads faster
+> Increased Jump Height
+> Changed Bullet Trail
+
+V0.92 - Modding Update
+> Added Donators List to Ad Menu
+> Added Text Ad to Mod so Modders can Earn Money
+> Added Characters to Mod Scripts
+> More Flexible Mod Folder Structure
+> Added Small Cooldown to Jumping
+
+V0.91 - Network Update
+> Update Net Code
+> Limited Loot Crate Spawning (Only 3 at a Time)
+> Client Side Prediction
+> Consistent Bullet Spread (Like in CS)
+> Added Kicking if Ping is Too High due to lag compensation
+> Showing all Friendlies on Minimap
+> Changed Some Maps
+> Removed Arrows on Wall
+> Changed Some Assets in Mod Folder
+> Disconnect when Tab is Changed (For Now)
+> Removed Convict (For Now)
+> Removed Crouching (For Now)
+> Removed Healing Bullets (For Now)
+> Performance Increased
+> Added Version History to Menu
+
+V0.90 - New Maps and Collisions
+> New and Improved Collision System
+> Increased Size of All Maps
+> Changed Collateral Damage for Hunter
+> Added Crosshair
+> Rendering Optimization
+
+V0.85 - Improved Modding
+> Improved Modding Support to allow for CSS Injecting
+> Optimized Mod Loading and Default Sprite Loading to Reduce Requests
+
+V0.80 - Modding Update
+> Added Modding Support
+> Added Ad Scripts
+
+V0.74 - Balancing
+> Balanced Game Mode Scores
+> Balanced Damage And Health
+> Added Jumping
+
+V0.50 - Round Based Game Modes
+> Added Round based system
+> Added Game Over Screen with Leaderboard
+> Added "Nice" Button to Game Over Screen
+
+V0.49 - Changed Game Mechanics and New Modes
+> Added Free For All
+> Added HardPoint Map
+> Allowed For Animated Clutter - Flags
+> Added Team Bars for Scoring
+
+V0.45 - Chat System & UI Update
+> Added Game Chat
+> Added Mini Map
+> Added Ping on Minimap when Shooting
+
+V0.35 - Improved Settings
+> Added More Settings - Server, UI
+
+V0.30 - More Optimizations and Settings
+> Added Several Settings for Graphics
+> UI Settings
+> Optimized Particle System
+
+V0.20 - First Update
+> Performance Optimizations
+> Updated Menu Screen
+> Reduced Download Requirements
+> Fixed Angle Bug where Player arms glitch through Player
+
+V0.10 - Initial Release
+The initial Release Feature The basic Game Concepts and features.
