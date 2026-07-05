@@ -1,10 +1,14 @@
 <script lang="ts">
-	import { gameModes } from "../../gamemodes.ts";
 	import { st } from "../../state.svelte.ts";
-	import type { GenData } from "../../types.ts";
-	import { getItemRarityColor, loadImageData } from "../../utils.ts";
+	import { getItemRarityColor, getUnlockScoreThreshold } from "../../utils.ts";
 	import CosmeticTooltip from "./CosmeticTooltip.svelte";
 	import SprayTooltip from "./SprayTooltip.svelte";
+
+	// guests keep today's free-selection behavior (matches the server's bypass
+	// for accounts with no persistent unlocks to check against)
+	function isOwned(unlocked: Set<number>, itemId: number): boolean {
+		return !st.loggedIn || unlocked.has(itemId);
+	}
 
 	let currentScreen:
 		| "main"
@@ -13,12 +17,7 @@
 		| "secondaryCamo"
 		| "hat"
 		| "shirt"
-		| "spray"
-		| "joinServer"
-		| "createServer" = $state("main");
-
-	let lobbyMessage = $state("Ask the host for the address.");
-	let createServerMessage = $state("Press start to start the Server.");
+		| "spray" = $state("main");
 
 	// sync preferences to localStorage
 	function savePref(key: string, value: string | undefined) {
@@ -71,66 +70,8 @@
 		st.socket?.emit("cSpray", st.loadout.spray?.id ?? 1);
 	});
 
-	// Reset join server message on room switch.
-	$effect(() => {
-		st.room;
-		lobbyMessage = "Ask the host for the address.";
-	});
-
-	const createGameOpts = $state({
-		srvPlayers: 6,
-		srvHealthMult: 1,
-		srvSpeedMult: 1,
-		srvPass: "",
-		srvMap: null as (GenData & { name: string }) | null,
-		srvClnWr: false,
-		srvModes: [] as number[],
-	});
-
-	/**
-	 * Initiates room join process through the "JOIN SERVER" menu.
-	 */
-	async function tryJoinRoom() {
-		const lobbyInput = document.getElementById("lobbyKey")! as HTMLInputElement;
-		if (st.changingLobby || st.room === lobbyInput.value) {
-			return;
-		} else if (!lobbyInput.value) {
-			lobbyMessage = "Please enter a valid IP.";
-			return;
-		}
-
-		lobbyMessage = "Please wait...";
-		const successfullyStartedJoin = await window.joinRoom(lobbyInput.value);
-
-		if (!successfullyStartedJoin) {
-			lobbyMessage = "No Server Found.";
-		}
-	}
-
-	async function startCreatedServer() {
-		createServerMessage = "Creating server...";
-		const res = await fetch("/api/createRoom", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(createGameOpts),
-		});
-		if (!res.ok) {
-			createServerMessage = "Failed to create server.";
-			return;
-		}
-		const { room, hostSecret } = await res.json();
-		st.hostSecret = hostSecret;
-		st.isHost = true;
-		createServerMessage = `Server code: ${room} (share this with friends)`;
-		window.joinRoom(room);
-	}
-
-	function closeCreatedServer() {
-		(window as any).closeServer?.();
-	}
 </script>
 <div style:display={currentScreen === "main" ? "block" : "none"}>
-	<h3 class="menuHeaderTabbed2">LOADOUT</h3>
 	<div>
 		<b>Class:</b>
 		<div class="hatSelectItem" onclick={() => currentScreen = "class"} style="display:inline-block">
@@ -217,15 +158,19 @@
 		</div>
 		<!-- hack (assuming every weapon has the same camo list, which is correct for now, but maybe not in the future) -->
 		{#each st.cosmetics.camos[0] as camo}
+			{@const owned = isOwned(st.unlockedItems.camo, camo.id)}
 			<div
 				class="hatSelectItem"
+				class:lockedItem={!owned}
 				style:color={getItemRarityColor(camo.chance)}
-				onclick={() => {st.loadout[currentScreen as "primaryCamo" | "secondaryCamo"] = camo; currentScreen = "main"}}
+				onclick={() => { if (owned) { st.loadout[currentScreen as "primaryCamo" | "secondaryCamo"] = camo; currentScreen = "main" } }}
 			>
 				{camo.name}
-				<!-- TODO: count from account -->
-				x{1}
-				<!-- tooltip? -->
+				{#if owned}
+					<span class="ownedTag">OWNED</span>
+				{:else}
+					<span class="lockHint">{getUnlockScoreThreshold(camo.chance).toLocaleString()} score</span>
+				{/if}
 			</div>
 		{/each}
 	</div>
@@ -236,15 +181,19 @@
 	<div>
 		<div class="hatSelectItem" onclick={() => {st.loadout.hat = null; currentScreen = "main"}}>Default</div>
 		{#each st.cosmetics.hats as hat}
+			{@const owned = isOwned(st.unlockedItems.hat, hat.id)}
 			<div
 				class="hatSelectItem"
+				class:lockedItem={!owned}
 				style:color={getItemRarityColor(hat.chance)}
-				onclick={() => {st.loadout.hat = hat; currentScreen = "main"}}
+				onclick={() => { if (owned) { st.loadout.hat = hat; currentScreen = "main" } }}
 			>
 				{hat.name}
-				<!-- TODO: count from account -->
-				x{1}
-				<CosmeticTooltip type="hat" item={hat} />
+				{#if owned}
+					<CosmeticTooltip type="hat" item={hat} />
+				{:else}
+					<span class="lockHint">{getUnlockScoreThreshold(hat.chance).toLocaleString()} score</span>
+				{/if}
 			</div>
 		{/each}
 	</div>
@@ -255,15 +204,19 @@
 	<div>
 		<div class="hatSelectItem" onclick={() => {st.loadout.shirt = null; currentScreen = "main"}}>Default</div>
 		{#each st.cosmetics.shirts as shirt}
+			{@const owned = isOwned(st.unlockedItems.shirt, shirt.id)}
 			<div
 				class="hatSelectItem"
+				class:lockedItem={!owned}
 				style:color={getItemRarityColor(shirt.chance)}
-				onclick={() => {st.loadout.shirt = shirt; currentScreen = "main"}}
+				onclick={() => { if (owned) { st.loadout.shirt = shirt; currentScreen = "main" } }}
 			>
 				{shirt.name}
-				<!-- TODO: count from account -->
-				x{1}
-				<CosmeticTooltip type="shirt" item={shirt} />
+				{#if owned}
+					<CosmeticTooltip type="shirt" item={shirt} />
+				{:else}
+					<span class="lockHint">{getUnlockScoreThreshold(shirt.chance).toLocaleString()} score</span>
+				{/if}
 			</div>
 		{/each}
 	</div>
@@ -281,160 +234,6 @@
 	</div>
 </div>
 
-<div style:display={currentScreen === "joinServer" ? "block" : "none"}>
-	<h3 class="menuHeaderTabbed2">JOIN SERVER</h3>
-	<input class="menuTextInput" placeholder="Server IP" id="lobbyKey" maxlength="50" style="margin-top:10px;">
-	<input
-		class="menuTextInput"
-		placeholder="Server Password (Optional)"
-		id="lobbyPass"
-		type="password"
-		maxlength="10"
-		style="margin-top:10px;margin-bottom:8px;"
-	>
-	<div id="lobbyMessage" style="margin-left:4px;">{lobbyMessage}</div>
-	<button
-		type="button"
-		id="joinLobbyButton"
-		class="smallMenuButton"
-		style="margin-left:5px;margin-top:10px;"
-		onclick={tryJoinRoom}
-	>
-		JOIN
-	</button>
-	<button
-		type="button"
-		class="smallMenuButton"
-		onclick={() => currentScreen = "main"}
-		style="margin-bottom:0px;margin-top:10px;"
-	>
-		BACK
-	</button>
-</div>
-
-<div style:display={currentScreen === "createServer" ? "block" : "none"}>
-	<div id="createServerContainer">
-		<h3 class="menuHeaderTabbed2" style="margin-bottom:8px;">CREATE SERVER</h3>
-		<h1>Statistics will not be affected by games played in private servers.</h1>
-		<b>Gamemodes:</b>
-		<div style="margin-top:5px;margin-bottom:5px;">
-			{#each gameModes as gameMode, idx}
-				<input type="checkbox" value={idx} bind:group={createGameOpts.srvModes}>
-				{gameMode.name}
-				<br>
-			{/each}
-		</div>
-		<b>Clan War</b>
-		<br>
-		<input type="checkbox" bind:checked={createGameOpts.srvClnWr}>
-		Enable
-		<br>
-		<b>Server Size: (2-8 Players)</b>
-		<input
-			class="menuTextInput"
-			placeholder="Number of Players"
-			bind:value={createGameOpts.srvPlayers}
-			min="2"
-			max="8"
-			step="2"
-			maxlength="1"
-			type="number"
-			style="margin-top:5px;margin-bottom:8px;width:95%;"
-		>
-		<b>Health Multiplier:</b>
-		<input
-			class="menuTextInput"
-			placeholder="Health Multiplier"
-			bind:value={createGameOpts.srvHealthMult}
-			min="0.1"
-			max="3.0"
-			step="0.1"
-			maxlength="1"
-			type="number"
-			style="margin-top:5px;margin-bottom:8px;width:95%;"
-		>
-		<b>Speed Multiplier:</b>
-		<input
-			class="menuTextInput"
-			placeholder="Speed Multiplier"
-			bind:value={createGameOpts.srvSpeedMult}
-			min="0.1"
-			max="2.0"
-			step="0.1"
-			maxlength="1"
-			type="number"
-			style="margin-top:5px;margin-bottom:8px;width:95%;"
-		>
-		<b>Password: (Optional)</b>
-		<input
-			class="menuTextInput"
-			placeholder="Server Password"
-			bind:value={createGameOpts.srvPass}
-			maxlength="10"
-			type="password"
-			style="margin-top:5px;margin-bottom:8px;width:95%;"
-		>
-		<b>Custom Map: (Optional)</b>
-		<button type="button" class="smallMenuButton" onclick={() => document.getElementById('customMapFile')!.click()}>
-			{createGameOpts.srvMap?.name ?? "Select Map"}
-		</button>
-		<input
-			type="file"
-			id="customMapFile"
-			style="display:none;"
-			accept="image/*"
-			onchange={async (event) => {
-			    const file = event.currentTarget?.files?.[0];
-        		if (!file) return;
-        		const name = event.currentTarget.value.split("\\").at(-1)!;
-        		createGameOpts.srvMap = { name, ...(await loadImageData(file)) };
-			}}
-		>
-		<div id="serverCreateMessage" class="selectable" style="margin-bottom:8px;">{createServerMessage}</div>
-		<button type="button" class="smallMenuButton" onclick={startCreatedServer}>START</button>
-	</div>
-	<button
-		type="button"
-		class="smallMenuButton"
-		onclick={() => currentScreen = "main"}
-		style="margin-bottom:0px;margin-top:10px;"
-	>
-		BACK
-	</button>
-</div>
-
-<div style="margin-top:-3px;margin-bottom:-5px;" style:display={currentScreen === "main" ? "block" : "none"}>
-	<h3 style="margin-top:12px;margin-bottom:3px;">SERVERS</h3>
-	<div
-		class="hatSelectItem"
-		style="display:inline-block; padding-left:0px;color:#76b3e3;"
-		onclick={() => currentScreen = "joinServer"}
-	>
-		Join a Server
-	</div>
-	|
-	<div
-		class="hatSelectItem"
-		style="display:inline-block; padding-left:3px;color:#76b3e3;"
-		onclick={() => currentScreen = "createServer"}
-	>
-		Create a Server
-	</div>
-	<b>Current Server:</b>
-	<div class="selectable" style="margin-bottom:8px;display:inline-block;">
-		{st.room && !st.changingLobby ? st.room : "Loading..."}
-	</div>
-	{#if st.isHost}
-		<div
-			class="hatSelectItem"
-			style="display:inline-block; padding-left:3px;color:#e37676;"
-			onclick={closeCreatedServer}
-		>
-			Close Server
-		</div>
-	{/if}
-</div>
-
 <style>
 	.cosmeticSelector {
 		max-height: 240px;
@@ -447,13 +246,14 @@
 		overflow-y: scroll;
 	}
 
-	#createServerContainer {
-		max-height: 190px;
-		overflow-y: scroll;
+	.lockedItem {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
-	.selectable {
-		-webkit-user-select: text;
-		user-select: text;
-		pointer-events: all;
+	.lockHint,
+	.ownedTag {
+		font-size: 10px;
+		opacity: 0.8;
+		margin-left: 4px;
 	}
 </style>

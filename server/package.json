@@ -2,7 +2,7 @@
 	"name": "server",
 	"version": "1.0.0",
 	"scripts": {
-		"dev": "node --watch --watch-preserve-output --import ./import-hooks.ts index.ts",
+		"dev": "node --watch --watch-preserve-output --env-file=../.env --import ./import-hooks.ts index.ts",
 		"start": "node --import ./import-hooks.ts index.ts"
 	},
 	"dependencies": {

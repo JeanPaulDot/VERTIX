@@ -414,6 +414,17 @@ export function getItemRarityColor(chance: number) {
 		return "#9d9d9d";
 	}
 }
+// mirrors the RARITY_TIERS score thresholds in server/unlocks.ts — display
+// only, the server is the actual source of truth for what's unlockable
+export function getUnlockScoreThreshold(chance: number): number {
+	if (chance <= 0) return Number.POSITIVE_INFINITY;
+	if (chance >= 90) return 0;
+	if (chance >= 20) return 2000;
+	if (chance >= 5) return 8000;
+	if (chance >= 0.5) return 20000;
+	if (chance >= 0.01) return 50000;
+	return Number.POSITIVE_INFINITY;
+}
 export async function loadImageData(file: File): Promise<GenData> {
 	const dataUrl = await new Promise<string>((resolve) => {
 		const reader = new FileReader();

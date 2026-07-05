@@ -59,7 +59,7 @@ export class Game {
 			room: this.roomName,
 			index: sid,
 			name: "UNKNOWN",
-			account: { clan: "DEV", rank: 0 },
+			account: { clan: "", rank: 0 },
 			classIndex: 0,
 			currentWeapon: 0,
 			weapons: [this.weapons[0]],

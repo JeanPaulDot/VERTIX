@@ -75,7 +75,9 @@
 		maxlength="50"
 		onkeydown={sendChat}
 	>
-	<div id="chatType" class="chat-control" onclick={changeChatType}>{currentChatType}</div>
+	{#if st.settings.selectChat}
+		<div id="chatType" class="chat-control" onclick={changeChatType}>{currentChatType}</div>
+	{/if}
 </div>
 
 <style>

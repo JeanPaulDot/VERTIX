@@ -1,5 +1,5 @@
 import { characterClasses } from "core/src/loadouts.ts";
-import { hats, shirts } from "core/src/skins.ts";
+import { camos, hats, shirts } from "core/src/skins.ts";
 
 const HTML_TAG_RE = /<[^>]*>/g;
 const MAX_NAME_LENGTH = 25;
@@ -31,12 +31,54 @@ export function isValidShirtIndex(id: unknown): boolean {
 	return typeof id === "number" && Number.isInteger(id) && id >= 1 && id <= shirts.length;
 }
 
+// 0 means "no camo" (client sends `primaryCamo?.id ?? 0`) — always valid,
+// no ownership needed; 1..camos.length are real, ownership-gated camo ids
+export function isValidCamoIndex(id: unknown): boolean {
+	return typeof id === "number" && Number.isInteger(id) && id >= 0 && id <= camos.length;
+}
+
 export function isValidWeaponIndex(id: unknown, weaponCount: number): boolean {
 	return typeof id === "number" && Number.isInteger(id) && id >= 0 && id < weaponCount;
 }
 
 export function isValidModeVoteIndex(i: unknown, modeVotes: unknown[]): boolean {
 	return typeof i === "number" && Number.isInteger(i) && i >= 0 && i < modeVotes.length;
+}
+
+// custom map uploads: keep in line with the size of the built-in maps (roughly
+// 15-25 tiles per side) so a malformed/huge upload can't hang the server
+// generating tiles or blow past reasonable memory
+const MIN_MAP_TILES = 8;
+const MAX_MAP_TILES = 64;
+
+export function isValidGenData(genData: unknown): genData is {
+	width: number;
+	height: number;
+	data: ArrayLike<number>;
+} {
+	if (!genData || typeof genData !== "object") return false;
+	const { width, height, data } = genData as Record<string, unknown>;
+	if (
+		typeof width !== "number" ||
+		typeof height !== "number" ||
+		!Number.isInteger(width) ||
+		!Number.isInteger(height) ||
+		width < MIN_MAP_TILES ||
+		width > MAX_MAP_TILES ||
+		height < MIN_MAP_TILES ||
+		height > MAX_MAP_TILES
+	) {
+		return false;
+	}
+	if (!data || typeof data !== "object") return false;
+	// mirrors the same `.data.data || .data` unwrap used when reading the buffer,
+	// since JSON round-tripping can turn a Uint8ClampedArray into a plain object
+	const buffer = (data as { data?: unknown }).data ?? data;
+	if (!buffer || typeof buffer !== "object") return false;
+	const expectedBytes = width * height * 4;
+	// last required byte must be present (works for arrays, typed arrays, and
+	// plain objects with numeric string keys alike)
+	return (buffer as Record<number, unknown>)[expectedBytes - 1] !== undefined;
 }
 
 export function isWithinShootDistance(
@@ -72,6 +114,29 @@ export function clampMovementInput(data: {
 		delta: clampNumber(data.delta, 0, MAX_MOVEMENT_DELTA),
 		s: data.s === 1 ? 1 : 0,
 		isn: clampNumber(data.isn, 0, 2_147_483_647),
+	};
+}
+
+// smooth per-key throttle (min gap between allowed calls), unlike
+// createRateLimiter's fixed per-second window: that shape is wrong for
+// per-frame input (movement/aim), since a high refresh-rate client blows
+// through a fixed window's quota partway through the second and then has
+// every remaining frame dropped until the window resets, which reads to
+// the client as the server freezing then snapping their position back
+export function createIntervalLimiter(minIntervalMs: number) {
+	const last = new Map<string, number>();
+
+	return function isAllowed(key: string): boolean {
+		const now = Date.now();
+		const prev = last.get(key) ?? 0;
+		if (now - prev < minIntervalMs) return false;
+		last.set(key, now);
+		if (last.size > 10000) {
+			for (const [k, t] of last) {
+				if (now - t > 60_000) last.delete(k);
+			}
+		}
+		return true;
 	};
 }
 

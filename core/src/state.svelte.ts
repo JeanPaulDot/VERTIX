@@ -4,6 +4,23 @@ import * as cosmetics from "./skins.ts";
 import { sprays } from "./sprays.ts";
 import type { Camo, Hat, MapData, Player, Shirt, Sprite } from "./types.ts";
 
+export type QuestItem = {
+	id: number;
+	name: string;
+	reward: string;
+	goal: number;
+	progress: number;
+	claimed: boolean;
+	claimable: boolean;
+	questKey: string;
+};
+
+export type QuestStreak = {
+	day: number;
+	claimed: boolean;
+	rewardLabel: string;
+};
+
 function getCosmeticPref<T extends { id: number }>(data: T[], key: string): T | null {
 	const value = localStorage.getItem(key);
 	console.debug(`loading ${value} from ${key}`);
@@ -54,6 +71,21 @@ export const st = $state({
 		shirts: [] as Shirt[],
 		camos: [] as Camo[][],
 	},
+	// item ids the logged-in player owns; empty sets for guests (who keep
+	// today's free-selection behavior everywhere else in the app)
+	unlockedItems: {
+		hat: new Set<number>(),
+		shirt: new Set<number>(),
+		camo: new Set<number>(),
+	},
+	unopenedCrateCount: 0,
+	// drives the single shared reward popup mounted in App.svelte
+	rewardPopup: null as
+		| null
+		| { kind: "unlocks"; items: { name: string; chance: number }[] }
+		| { kind: "rankUp"; rank: number }
+		| { kind: "pendingCrates"; count: number }
+		| { kind: "crateOpen"; won: { itemName: string; chance: number } | null },
 	sprays,
 	characterClasses,
 	shake: {
@@ -83,6 +115,26 @@ export const st = $state({
 	mobile: false,
 	socket: null as Socket | null,
 	room: null as string | null,
+	// which main-menu modal is open (null = none)
+	menuModal: null as null | "account" | "rooms" | "settings" | "controls" | "mods",
+	// quest system state
+	quests: {
+		daily: [] as QuestItem[],
+		weekly: null as QuestItem | null,
+		streak: { day: 0, claimed: false, rewardLabel: "" } as QuestStreak,
+		dailyReset: "",
+		weeklyReset: "",
+	},
+	// status/feedback text rendered by StatusMessage components; shared because
+	// socket handlers in app.tsx write them too
+	messages: {
+		login: "",
+		clanDB: "Join or Create a Clan.",
+		clanInv: "Invite or Kick Members.",
+		clanCht: "(eg. Discord URL)",
+		editProfile: "Edit Profile Info.",
+		serverCreate: "Press start to start the Server.",
+	},
 	hostSecret: null as string | null,
 	isHost: false,
 	settings: Object.assign(
@@ -99,7 +151,9 @@ export const st = $state({
 			showUI: true,
 			showPINGFPS: true,
 			showLeader: true,
-			selectChat: false,
+			// default true: preserves the always-visible ALL/TEAM toggle that existed
+			// before this setting was wired up; unchecking now hides it (e.g. FFA-only players)
+			selectChat: true,
 		},
 		JSON.parse(localStorage.getItem("settings") ?? "{}") as object,
 	),

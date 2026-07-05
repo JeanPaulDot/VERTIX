@@ -1,17 +1,31 @@
 <script lang="ts">
+	import { onMount } from "svelte";
+
 	interface Props {
 		currentPage: string;
 	}
 	const { currentPage }: Props = $props();
+
+	let username: string | null = $state(null);
+
+	onMount(async () => {
+		const res = await fetch("/api/auth/me");
+		if (res.ok) {
+			const account = await res.json();
+			username = account.username ?? null;
+		}
+	});
 </script>
 <nav>
 	<ul id="n" class="clearfix">
 		<li><a target="_blank" href="/">Play</a></li>
-		<li class:sel={currentPage === "profile"}><a href="#">Profile</a></li>
-		<li><a href="#">Achievements</a></li>
-		<li><a href="#">Clans</a></li>
+		<li class:sel={currentPage === "profile"} class:disabledLink={!username}>
+			<a href={username ? `/profile.html?${username}` : undefined}>Profile</a>
+		</li>
+		<li class="disabledLink"><a href="#">Achievements</a></li>
+		<li class:sel={currentPage === "clans"}><a href="./clans.html">Clans</a></li>
 		<li class:sel={currentPage === "leaderboards"}><a href="./leaderboards.html">Leaderboards</a></li>
-		<li><a href="#">Find Friends</a></li>
+		<li class:sel={currentPage === "friends"}><a href="./friends.html">Find Friends</a></li>
 		<li class:sel={currentPage === "donate"}><a href="./donate.html">Donate</a></li>
 	</ul>
 </nav>
@@ -66,6 +80,12 @@
 	ul#n li.sel a {
 		color: #fff;
 		text-shadow: none;
+	}
+
+	ul#n li.disabledLink a {
+		color: #ccc;
+		cursor: default;
+		pointer-events: none;
 	}
 
 	.clearfix:after {

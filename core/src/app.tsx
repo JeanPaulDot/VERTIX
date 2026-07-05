@@ -3,7 +3,7 @@ import { io, type Socket } from "socket.io-client";
 import { flushSync, mount } from "svelte";
 import { resetCooldownAnimations } from "./components/ActionBar.svelte";
 import App from "./components/App.svelte";
-import { weaponNames } from "./loadouts.ts";
+import { weaponNames, weapons } from "./loadouts.ts";
 import { Projectile } from "./logic/projectile.ts";
 import { loadSounds, playSound, startSoundTrack, stopAllSounds } from "./sound.ts";
 import { st } from "./state.svelte.ts";
@@ -56,6 +56,7 @@ const {
 	randomInt,
 	canSee,
 	TeamColors,
+	getItemRarityColor,
 } = utils;
 
 mount(App, {
@@ -129,32 +130,58 @@ function enterGame() {
 		}
 	}
 }
-var clanDBMessage = document.getElementById("clanDBMessage")!;
 var clanStats = document.getElementById("clanStats")!;
 var clanSignUp = document.getElementById("clanSignUp")!;
 var clanHeader = document.getElementById("clanHeader")!;
 var clanAdminPanel = document.getElementById("clanAdminPanel")!;
 var leaveClanButton = document.getElementById("leaveClanButton")!;
-var clanInvMessage = document.getElementById("clanInvMessage")!;
-var clanChtMessage = document.getElementById("clanChtMessage")!;
 var clanChatLink = document.getElementById("clanChatLink")!;
-var loginMessage = document.getElementById("loginMessage")!;
-var serverCreateMessage = document.getElementById("serverCreateMessage")!;
+
+const oauthErrorMessages: Record<string, string> = {
+	oauth_failed: "Discord login failed. Please try again.",
+	invalid_state: "Discord login expired. Please try again.",
+	no_code: "Discord login was cancelled.",
+	access_denied: "Discord login was cancelled.",
+};
+function showLoginError(error: string) {
+	st.messages.login = oauthErrorMessages[error] ?? `Login error: ${error}`;
+}
 
 // surface errors from the OAuth callback redirect (/?error=...) and strip the
 // param before window.onload interprets location.search as a room code
 const oauthError = new URLSearchParams(location.search).get("error");
 if (oauthError) {
 	history.replaceState(null, "", "/");
-	const oauthErrorMessages: Record<string, string> = {
-		oauth_failed: "Discord login failed. Please try again.",
-		invalid_state: "Discord login expired. Please try again.",
-		no_code: "Discord login was cancelled.",
-		access_denied: "Discord login was cancelled.",
-	};
-	loginMessage.style.display = "block";
-	loginMessage.textContent = oauthErrorMessages[oauthError] ?? `Login error: ${oauthError}`;
+	showLoginError(oauthError);
 }
+
+// the OAuth popup posts back here when it finishes (see /api/auth/discord?popup=1)
+window.addEventListener("message", (event) => {
+	if (event.origin !== location.origin) return;
+	if (!event.data || event.data.type !== "vertix:discord-login") return;
+	if (event.data.error) {
+		showLoginError(event.data.error);
+	} else {
+		refreshLogin();
+	}
+});
+
+// pick up the session cookie without reloading: apply the account to the UI and,
+// when safely in the menu, reconnect the room socket so its handshake (which is
+// what ties round stats to the account) carries the fresh session
+async function refreshLogin(): Promise<boolean> {
+	const resp = await fetch("/api/auth/me");
+	if (!resp.ok) return false;
+	const account = (await resp.json()) as Account;
+	applyAccount(account);
+	if (!st.gameStart && st.room && !st.changingLobby) {
+		const room = st.room;
+		st.player.room = "";
+		joinRoom(room);
+	}
+	return true;
+}
+window.refreshLogin = refreshLogin;
 
 window.onload = async () => {
 	if (st.mobile) {
@@ -169,21 +196,55 @@ window.onload = async () => {
 		loadingWrapper.style.display = "none";
 	});
 
+	// only join automatically when the URL carries an explicit invite (?ROOMCODE);
+	// otherwise autojoin the best available room
 	const roomName = location.search.substring(1) || "";
 	if (roomName) {
 		joinRoom(roomName);
 	} else {
-		const resp = await fetch("/api/autoJoin");
-		const { room } = await resp.json();
-		if (room) {
-			joinRoom(room);
-		}
+		// autojoin: fetch the best available room from the server
+		fetch("/api/autoJoin")
+			.then((r) => r.json())
+			.then((data: { room: string | null }) => {
+				if (data.room) {
+					joinRoom(data.room);
+				}
+			})
+			.catch(() => {});
 	}
 };
 
 var newUsernameInput = document.getElementById("newUsernameInput")! as HTMLInputElement;
 var youtubeChannelInput = document.getElementById("youtubeChannelInput")! as HTMLInputElement;
-var editProfileMessage = document.getElementById("editProfileMessage")!;
+// shown at most once per page load, the first time we learn crates are
+// waiting — later room switches/reconnects push the same account payload
+// again and shouldn't re-open the popup every time
+var pendingCratesModalShown = false;
+// applies a logged-in account to the UI; receives the server's "updAccStat"
+// payload (pushed when the socket carries a valid session cookie) and the
+// /api/auth/me response after an OAuth popup login
+function applyAccount(account: Account) {
+	if (account.username) {
+		st.playerName = account.username;
+		localStorage.setItem("userName", account.username);
+		st.loggedIn = true;
+		st.player.loggedIn = true;
+		const user = findUserByIndex(st.player.index);
+		if (user) {
+			user.loggedIn = true;
+		}
+		// request quest data for this user
+		socket?.emit("getQuests");
+	}
+	if (typeof account.pendingCrates === "number") {
+		st.unopenedCrateCount = account.pendingCrates;
+		if (account.pendingCrates > 0 && !pendingCratesModalShown) {
+			pendingCratesModalShown = true;
+			st.rewardPopup = { kind: "pendingCrates", count: account.pendingCrates };
+		}
+	}
+	updateAccountPage(account);
+}
 function updateAccountPage(a: Account) {
 	st.player.account = a;
 	// legacy element: removed from AccountTab.svelte, may not exist
@@ -202,7 +263,7 @@ function updateAccountPage(a: Account) {
 			userName: newUsernameInput.value,
 			userChannel: youtubeChannelInput.value,
 		});
-		editProfileMessage.textContent = "Please Wait...";
+		st.messages.editProfile = "Please Wait...";
 	};
 	clanAdminPanel.style.display = "none";
 	leaveClanButton.style.display = "none";
@@ -502,7 +563,7 @@ function setupSocket(sock: Socket) {
 			deactiveAllAnimTexts();
 			st.gameStart = false;
 			hideUI(false);
-			document.getElementById("startMenuWrapper")!.style.display = "block";
+			document.getElementById("startMenuWrapper")!.style.display = "flex";
 		}
 		if (st.gameOver) {
 			document.getElementById("gameStatWrapper")!.style.display = "none";
@@ -519,21 +580,17 @@ function setupSocket(sock: Socket) {
 	});
 	sock.on("cSrvRes", (a, d) => {
 		if (d) {
-			serverCreateMessage.textContent = `Success. Created server with IP: ${a}`;
+			st.messages.serverCreate = `Success. Created server with IP: ${a}`;
 		} else {
-			serverCreateMessage.textContent = a;
+			st.messages.serverCreate = a;
 		}
 	});
-	sock.on("regRes", (a, d) => {
-		if (!d) {
-			loginMessage.style.display = "block";
-		}
-		loginMessage.textContent = a;
+	sock.on("regRes", (a, _d) => {
+		st.messages.login = a;
 	});
 	sock.on("logRes", (a, d) => {
 		if (d) {
-			loginMessage.style.display = "none";
-			loginMessage.textContent = "";
+			st.messages.login = "";
 			st.playerName = a.text;
 			localStorage.setItem("logKey", a.logKey);
 			localStorage.setItem("userName", a.text);
@@ -544,27 +601,23 @@ function setupSocket(sock: Socket) {
 				user.loggedIn = true;
 			}
 		} else {
-			loginMessage.style.display = "block";
-			loginMessage.textContent = a;
+			st.messages.login = a;
 		}
 	});
 	sock.on("recovRes", (b, d) => {
-		loginMessage.style.display = "block";
-		loginMessage.textContent = b;
+		st.messages.login = b;
 		if (!d) return;
 		document.getElementById("recoverForm")!.style.display = "block";
 		const chngPassKey = document.getElementById("chngPassKey")! as HTMLInputElement;
 		const chngPassPass = document.getElementById("chngPassPass")! as HTMLInputElement;
 		document.getElementById("chngPassButton")!.onclick = () => {
-			loginMessage.style.display = "block";
-			loginMessage.textContent = "Please Wait...";
+			st.messages.login = "Please Wait...";
 			sock.emit("dbCngPass", {
 				passKey: chngPassKey.value,
 				newPass: chngPassPass.value,
 			});
 			sock.on("cngPassRes", (a, b) => {
-				loginMessage.style.display = "block";
-				loginMessage.textContent = a;
+				st.messages.login = a;
 				if (b) {
 					document.getElementById("recoverForm")!.style.display = "none";
 				}
@@ -580,8 +633,7 @@ function setupSocket(sock: Socket) {
 			leaveClanButton.style.display = "inline-block";
 			leaveClanButton.textContent = "DELETE CLAN";
 		} else {
-			clanDBMessage.style.display = "block";
-			clanDBMessage.textContent = a;
+			st.messages.clanDB = a;
 		}
 	});
 	sock.on("dbClanJoinR", (a, d) => {
@@ -597,30 +649,25 @@ function setupSocket(sock: Socket) {
 			leaveClanButton.style.display = "inline-block";
 			leaveClanButton.textContent = "Leave Clan";
 		} else {
-			clanDBMessage.style.display = "block";
-			clanDBMessage.textContent = a;
+			st.messages.clanDB = a;
 		}
 	});
 	sock.on("dbClanInvR", (a, _) => {
-		clanInvMessage.style.display = "block";
-		clanInvMessage.textContent = a;
+		st.messages.clanInv = a;
 	});
 	sock.on("dbKickInvR", (a, _) => {
-		clanInvMessage.style.display = "block";
-		clanInvMessage.textContent = a;
+		st.messages.clanInv = a;
 	});
 	sock.on("dbClanLevR", (a, d) => {
 		if (!d) return;
 		clanSignUp.style.display = "block";
 		clanStats.style.display = "none";
 		clanHeader.textContent = "Clans";
-		clanDBMessage.style.display = "block";
-		clanDBMessage.textContent = a;
+		st.messages.clanDB = a;
 		leaveClanButton.style.display = "none";
 	});
 	sock.on("dbChatR", (a, d) => {
-		clanChtMessage.style.display = "inline-block";
-		clanChtMessage.textContent = a.text;
+		st.messages.clanCht = a.text;
 		if (!d) return;
 		if (!a.newURL.match(/^https?:\/\//i)) {
 			a.newURL = `http://${a.newURL}`;
@@ -635,28 +682,39 @@ function setupSocket(sock: Socket) {
 		if (d) {
 			localStorage.setItem("userName", a);
 			st.player.account.username = a;
-			editProfileMessage.textContent = "Success. Account Updated.";
+			st.messages.editProfile = "Success. Account Updated.";
 		} else {
-			editProfileMessage.textContent = a;
+			st.messages.editProfile = a;
 		}
 	});
 	sock.on("dbClanStats", (clanData) => {
 		st.clanData = clanData;
 	});
-	sock.on("updAccStat", (account: Account) => {
-		// sent by the server whenever the socket carries a valid session cookie
-		// (e.g. right after the Discord OAuth redirect) — reflect the login in the UI
-		if (account.username) {
-			st.playerName = account.username;
-			localStorage.setItem("userName", account.username);
-			st.loggedIn = true;
-			st.player.loggedIn = true;
-			const user = findUserByIndex(st.player.index);
-			if (user) {
-				user.loggedIn = true;
+	sock.on("updAccStat", applyAccount);
+	sock.on("questData", (data) => {
+		if (!data) return;
+		st.quests.daily = data.daily ?? [];
+		st.quests.weekly = data.weekly ?? null;
+		st.quests.streak = data.streak ?? { day: 0, claimed: false, rewardLabel: "" };
+		st.quests.dailyReset = data.dailyReset ?? "";
+		st.quests.weeklyReset = data.weeklyReset ?? "";
+	});
+	sock.on("questProgressUpdate", (snapshot) => {
+		if (!snapshot?.daily) return;
+		// merge live progress into local quest state
+		for (const live of snapshot.daily) {
+			const q = st.quests.daily.find((dq) => dq.questKey === live.questKey);
+			if (q) {
+				q.progress = live.progress;
+				q.claimable = live.claimable;
 			}
 		}
-		updateAccountPage(account);
+	});
+	sock.on("questClaimResult", (result) => {
+		// quest data will be pushed by the server after a successful claim
+	});
+	sock.on("streakComplete", () => {
+		st.rewardPopup = { kind: "pendingCrates", count: st.unopenedCrateCount + 1 };
 	});
 	sock.on(
 		"gameSetup",
@@ -725,6 +783,22 @@ function setupSocket(sock: Socket) {
 	sock.on("updHt", (_len: number, data: Hat[]) => (st.cosmetics.hats = data));
 	sock.on("updShrt", (_len: number, data: Shirt[]) => (st.cosmetics.shirts = data));
 	sock.on("updCmo", (_len: number, data: Camo[][]) => (st.cosmetics.camos = data));
+	sock.on("updUnlocks", (data: { hat: number[]; shirt: number[]; camo: number[] }) => {
+		st.unlockedItems.hat = new Set(data.hat);
+		st.unlockedItems.shirt = new Set(data.shirt);
+		st.unlockedItems.camo = new Set(data.camo);
+	});
+	sock.on("unlockReveal", (items: { name: string; chance: number }[]) => {
+		if (items.length > 0) st.rewardPopup = { kind: "unlocks", items };
+	});
+	sock.on("rankUp", (rank: number) => {
+		st.rewardPopup = { kind: "rankUp", rank };
+	});
+	sock.on("crateResult", (data: { error?: string; won?: { itemName: string; chance: number } | null; remaining?: number }) => {
+		if (data.error) return;
+		st.unopenedCrateCount = data.remaining ?? st.unopenedCrateCount;
+		st.rewardPopup = { kind: "crateOpen", won: data.won ?? null };
+	});
 	sock.on("crtSpr", createSpray);
 	sock.on("rem", removeUser);
 	sock.on("cht", messageFromServer);
@@ -871,7 +945,7 @@ function setupSocket(sock: Socket) {
 			st.player.dead = true;
 			window.setTimeout(() => {
 				if (!st.gameOver) {
-					document.getElementById("startMenuWrapper")!.style.display = "block";
+					document.getElementById("startMenuWrapper")!.style.display = "flex";
 					document.getElementById("linkBoxRight")!.style.display = "block";
 				}
 			}, 1300);
@@ -964,7 +1038,7 @@ function showESCMenu() {
 	st.startingGame = false;
 	inMainMenu = true;
 	hideUI(false);
-	document.getElementById("startMenuWrapper")!.style.display = "block";
+	document.getElementById("startMenuWrapper")!.style.display = "flex";
 	document.getElementById("gameStatWrapper")!.style.display = "none";
 }
 
@@ -1298,7 +1372,6 @@ function showUI() {
 	}
 }
 function hideMenuUI() {
-	document.getElementById("linkBoxLeft")!.style.display = "none";
 	document.getElementById("linkBoxRight")!.style.display = "none";
 }
 function hideUI(hideChatbox: boolean) {
@@ -1562,11 +1635,12 @@ function doGame(delta: number) {
 	}
 	drawBackground();
 	drawMap(0);
+	updateBulletsAndDrawTrails(delta);
 	drawMap(1);
 	drawSprays();
 	updateParticles(delta, 0);
 	drawGameObjects(delta);
-	updateBullets(delta);
+	drawBullets();
 	updateParticles(delta, 1);
 	drawMap(2);
 	drawPlayerNames();
@@ -1596,8 +1670,7 @@ function resize() {
 		(window.innerWidth - st.maxScreenWidth * a) / 2,
 		(window.innerHeight - st.maxScreenHeight * a) / 2,
 	);
-	document.getElementById("startMenuWrapper")!.style.transform =
-		`perspective(1px) translate(-50%, -50%) scale(${uiScale})`;
+	// startMenuWrapper is a responsive full-screen flex overlay now — no JS scaling
 	document.getElementById("gameStatWrapper")!.style.transform =
 		`perspective(1px) translate(-50%, -50%) scale(${uiScale})`;
 	graph.imageSmoothingEnabled = false;
@@ -1627,31 +1700,31 @@ function drawGameLights(delta: number) {
 	if (!st.sprites.light || !graph) return;
 	graph.globalCompositeOperation = "lighter";
 	graph.globalAlpha = 0.2;
-	for (const tmpObject of bullets) {
-		if (!st.settings.showGlows || tmpObject.spriteIndex === 2 || !tmpObject.active) continue;
-		let tmpBulletGlowWidth = tmpObject.glowWidth || Math.min(200, tmpObject.width * 14);
-		let tmpBulletGlowHeight = tmpObject.glowHeight || tmpObject.height * 2.5;
-		let lightX = tmpObject.x - st.startX;
-		let lightY = tmpObject.y - st.startY;
-		if (!canSee(lightX, lightY, tmpBulletGlowWidth, tmpBulletGlowHeight)) continue;
-		graph.save();
-		graph.translate(lightX, lightY);
-		drawSprite(
-			graph,
-			st.sprites.light,
-			-(tmpBulletGlowWidth / 2),
-			-(tmpBulletGlowHeight / 2) + tmpObject.height / 2,
-			tmpBulletGlowWidth,
-			tmpBulletGlowHeight,
-			tmpObject.dir - Math.PI / 2,
-			false,
-			0,
-			0,
-			0,
-		);
-		graph.restore();
-	}
 	if (st.settings.showGlows) {
+		for (const tmpObject of bullets) {
+			if (!tmpObject.active || tmpObject.spriteIndex === 2) continue;
+			let tmpBulletGlowWidth = tmpObject.glowWidth || Math.min(200, tmpObject.width * 14);
+			let tmpBulletGlowHeight = tmpObject.glowHeight || tmpObject.height * 2.5;
+			let lightX = tmpObject.x - st.startX;
+			let lightY = tmpObject.y - st.startY;
+			if (!canSee(lightX, lightY, tmpBulletGlowWidth, tmpBulletGlowHeight)) continue;
+			graph.save();
+			graph.translate(lightX, lightY);
+			drawSprite(
+				graph,
+				st.sprites.light,
+				-(tmpBulletGlowWidth / 2),
+				-(tmpBulletGlowHeight / 2) + tmpObject.height / 2,
+				tmpBulletGlowWidth,
+				tmpBulletGlowHeight,
+				tmpObject.dir - Math.PI / 2,
+				false,
+				0,
+				0,
+				0,
+			);
+			graph.restore();
+		}
 		graph.globalAlpha = 0.2;
 		updateFlashGlows(delta);
 	}
@@ -1951,68 +2024,94 @@ function someoneShot(evt: ShootEvent) {
 		}
 	}
 }
-function updateBullets(delta: number) {
+var trailGradient: CanvasGradient | null = null;
+// runs the bullet physics step and draws the trails; called early in the frame
+// (before the wall front faces in drawMap(1)) so trails crossing behind a wall
+// are occluded by it instead of drawing on top of the wall face
+function updateBulletsAndDrawTrails(delta: number) {
 	graph.globalAlpha = 1;
 	for (const bullet of bullets) {
-		const wasActive = bullet.active;
+		bullet.wasActiveThisFrame = bullet.active;
 		bullet.update(delta, currentTime, clutter, st.gameMap.tiles, st.players);
-		const drawThisFrame = bullet.active || (wasActive && !bullet.active);
-		if (drawThisFrame) {
-			const screenX = bullet.x - st.startX;
-			const screenY = bullet.y - st.startY;
-			if (canSee(screenX, screenY, bullet.height, bullet.height)) {
-				graph.save();
-				graph.translate(screenX, screenY);
-				if (bullet.spriteIndex === 2) {
-					graph.globalCompositeOperation = "lighter";
-					graph.globalAlpha = 0.3;
-					drawSprite(
-						graph,
-						bulletSprites[bullet.spriteIndex],
-						-(bullet.glowWidth / 2),
-						-(bullet.glowHeight / 2) + bullet.height / 2,
-						bullet.glowWidth,
-						bullet.glowHeight,
-						bullet.dir - Math.PI / 2,
-						false,
-						0,
-						0,
-						0,
-					);
-				} else {
-					drawSprite(
-						graph,
-						bulletSprites[bullet.spriteIndex],
-						-(bullet.width / 2),
-						0,
-						bullet.width,
-						bullet.height + 8,
-						bullet.dir - Math.PI / 2,
-						false,
-						0,
-						0,
-						0,
-					);
-				}
-				graph.restore();
-			}
-		}
 		if (st.settings.showBTrails && bullet.trailAlpha > 0) {
-			graph.save();
 			let x = Math.round(bullet.startX - st.startX);
 			let y = Math.round(bullet.startY - st.startY);
 			let x2 = Math.round(bullet.x - st.startX);
 			let y2 = Math.round(bullet.y - st.startY);
-			let trailGrad = graph.createLinearGradient(x, y, x2, y2);
-			trailGrad.addColorStop(0, "rgba(255, 255, 255, 0)");
-			trailGrad.addColorStop(1, `rgba(255, 255, 255, ${bullet.trailAlpha})`);
-			graph.strokeStyle = trailGrad;
-			graph.lineWidth = bullet.trailWidth;
-			graph.beginPath();
-			graph.moveTo(x, y);
-			graph.lineTo(x2, y2);
-			graph.closePath();
-			graph.stroke();
+			const trailDx = x2 - x;
+			const trailDy = y2 - y;
+			const trailLen = Math.hypot(trailDx, trailDy);
+			if (trailLen > 0) {
+				// one unit-space gradient reused for every trail: the transform
+				// stretches it onto the trail line and globalAlpha applies the
+				// per-bullet trailAlpha, so no gradient is allocated per frame
+				if (trailGradient == null) {
+					trailGradient = graph.createLinearGradient(0, 0, 1, 0);
+					trailGradient.addColorStop(0, "rgba(255, 255, 255, 0)");
+					trailGradient.addColorStop(1, "rgba(255, 255, 255, 1)");
+				}
+				graph.save();
+				graph.translate(x, y);
+				graph.rotate(Math.atan2(trailDy, trailDx));
+				graph.scale(trailLen, 1);
+				graph.globalAlpha = bullet.trailAlpha;
+				graph.strokeStyle = trailGradient;
+				graph.lineWidth = bullet.trailWidth;
+				graph.beginPath();
+				graph.moveTo(0, 0);
+				graph.lineTo(1, 0);
+				graph.closePath();
+				graph.stroke();
+				graph.restore();
+			}
+		}
+	}
+	graph.globalAlpha = 1;
+}
+
+// draws the bullet sprites at their post-update positions; kept at the original
+// spot in the frame (after players) so bullets still render above game objects
+function drawBullets() {
+	graph.globalAlpha = 1;
+	for (const bullet of bullets) {
+		const drawThisFrame = bullet.active || (bullet.wasActiveThisFrame && !bullet.active);
+		if (!drawThisFrame) continue;
+		const screenX = bullet.x - st.startX;
+		const screenY = bullet.y - st.startY;
+		if (canSee(screenX, screenY, bullet.height, bullet.height)) {
+			graph.save();
+			graph.translate(screenX, screenY);
+			if (bullet.spriteIndex === 2) {
+				graph.globalCompositeOperation = "lighter";
+				graph.globalAlpha = 0.3;
+				drawSprite(
+					graph,
+					bulletSprites[bullet.spriteIndex],
+					-(bullet.glowWidth / 2),
+					-(bullet.glowHeight / 2) + bullet.height / 2,
+					bullet.glowWidth,
+					bullet.glowHeight,
+					bullet.dir - Math.PI / 2,
+					false,
+					0,
+					0,
+					0,
+				);
+			} else {
+				drawSprite(
+					graph,
+					bulletSprites[bullet.spriteIndex],
+					-(bullet.width / 2),
+					0,
+					bullet.width,
+					bullet.height + 8,
+					bullet.dir - Math.PI / 2,
+					false,
+					0,
+					0,
+					0,
+				);
+			}
 			graph.restore();
 		}
 	}
@@ -2020,7 +2119,8 @@ function updateBullets(delta: number) {
 
 declare global {
 	interface Window {
-		joinRoom: typeof joinRoom;
+		joinRoom: (roomName: string, password?: string) => Promise<boolean>;
+		refreshLogin: () => Promise<boolean>;
 	}
 }
 // so we don't take over and break the back and forward buttons
@@ -2029,7 +2129,7 @@ declare global {
 // });
 
 window.joinRoom = joinRoom;
-async function joinRoom(roomName: string) {
+async function joinRoom(roomName: string, password?: string) {
 	if (st.changingLobby) return false;
 	// history.pushState(room, "", `${location.origin}/?${room}`);
 	st.changingLobby = true;
@@ -2047,20 +2147,20 @@ async function joinRoom(roomName: string) {
 		return false;
 	}
 
+	const auth = password ? { password } : undefined;
 	if (!socket) {
-		socket = io(`/${room}`);
+		socket = io(`/${room}`, { auth });
 		st.socket = socket;
 		setupSocket(socket);
 		setupInitialSocket(socket);
 	} else {
 		socket.close();
-		socket = io(`/${room}`);
+		socket = io(`/${room}`, { auth });
 		st.socket = socket;
 		setupSocket(socket);
 	}
 	inMainMenu = true;
 	hideUI(true);
-	document.getElementById("linkBoxLeft")!.style.display = "block";
 	document.getElementById("linkBoxRight")!.style.display = "block";
 	st.chatLines = [];
 
@@ -2245,7 +2345,9 @@ async function loadModPack(url: string, isBaseAssets: boolean) {
 			loadingTexturePack = true;
 			if (url.includes(".")) {
 				modPath = url;
-				if (!modPath.match(/^https?:\/\//i)) {
+				if (modPath.startsWith("/")) {
+					modPath = `${window.location.origin}${modPath}`;
+				} else if (!modPath.match(/^https?:\/\//i)) {
 					modPath = `http://${modPath}`;
 				}
 			} else {
@@ -2271,6 +2373,7 @@ async function loadModPack(url: string, isBaseAssets: boolean) {
 				} else if (entry.filename.includes("cssmod")) {
 					let styleElem = document.createElement("style");
 					styleElem.textContent = data;
+					document.head.appendChild(styleElem);
 				} else if (entry.filename.includes("gameinfo")) {
 					data = data.replace(/(\r\n|\n|\r)/gm, "");
 					let parsed = JSON.parse(data);
@@ -2757,6 +2860,157 @@ function drawPlayer(plr: Player, delta: number) {
 	playerContext.restore();
 }
 
+declare global {
+	interface Window {
+		renderLoadoutPreview: typeof renderLoadoutPreview;
+	}
+}
+window.renderLoadoutPreview = renderLoadoutPreview;
+// Draws the currently selected loadout (st.loadout) as a static, front-facing
+// character on the given canvas. Reuses the same sprite getters as drawPlayer
+// but touches no game/camera state, so the live renderer is unaffected.
+// Sprites and hat/shirt images load lazily; drawSprite skips images that
+// aren't ready yet, so callers should redraw a few times after loadout changes.
+function renderLoadoutPreview(canvas: HTMLCanvasElement) {
+	const ctx = canvas.getContext("2d")!;
+	ctx.imageSmoothingEnabled = false;
+	ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+	const classIndex = st.characterClasses.findIndex(
+		(c) => c.folderName === st.loadout.class.folderName,
+	);
+	if (classIndex < 0) return;
+	const cls = st.loadout.class;
+	const previewPlayer = {
+		classIndex,
+		width: cls.width,
+		height: cls.height,
+		account: {
+			rank: 0,
+			hat: st.loadout.hat ?? undefined,
+			shirt: st.loadout.shirt ?? undefined,
+		},
+	} as unknown as Player;
+
+	ctx.save();
+	// feet baseline placed so the hat (above) and the weapon (below) both fit;
+	// drawing is in world units sized for a 200px-wide canvas, so scale up
+	// proportionally when the preview canvas is larger
+	const previewScale = canvas.width / 200;
+	ctx.translate(canvas.width / 2, canvas.height - 60 * previewScale);
+	ctx.scale(previewScale, previewScale);
+	ctx.globalAlpha = 1;
+
+	const lowerBodySprite = getPlayerSprite(classIndex, 0, 1);
+	if (lowerBodySprite != null) {
+		drawSprite(
+			ctx,
+			lowerBodySprite,
+			-(cls.width / 2),
+			-(cls.height * 0.318),
+			cls.width,
+			cls.height * 0.318,
+			0,
+			true,
+			0,
+			0.5,
+			0,
+		);
+	}
+	const upperBodySprite = getPlayerSprite(classIndex, 0, 0);
+	if (upperBodySprite != null) {
+		drawSprite(
+			ctx,
+			upperBodySprite,
+			-(cls.width / 2),
+			-cls.height,
+			cls.width,
+			cls.height * 0.682,
+			0,
+			true,
+			cls.height * 0.477,
+			0.5,
+			0,
+		);
+	}
+	const shirtSprite = getShirtSprite(previewPlayer, 0);
+	if (shirtSprite != null) {
+		ctx.globalAlpha = 0.9;
+		drawSprite(
+			ctx,
+			shirtSprite,
+			-(cls.width / 2),
+			-cls.height,
+			cls.width,
+			cls.height * 0.682,
+			0,
+			true,
+			cls.height * 0.477,
+			0.5,
+			0,
+		);
+		ctx.globalAlpha = 1;
+	}
+	const hatScale = cls.width * 0.833;
+	const hatSprite = getHatSprite(previewPlayer, 0);
+	if (hatSprite != null) {
+		drawSprite(
+			ctx,
+			hatSprite,
+			-(hatScale / 2),
+			-(cls.height + hatScale * 0.045),
+			hatScale,
+			hatScale,
+			0,
+			false,
+			0,
+			0.5,
+			0,
+		);
+	}
+
+	// front-facing primary weapon pointing down, with both arms — mirrors
+	// drawPlayer's front-weapon branch for the down-facing (angle 0) case
+	const baseWeapon = weapons[cls.weaponIndexes[0]];
+	if (baseWeapon) {
+		const camoId = st.loadout.primaryCamo?.id ?? 0;
+		const weaponSprite = getWeaponSprite(baseWeapon.weaponIndex, camoId, 0);
+		const armSprite = classSpriteSheets[classIndex]?.arm;
+		if (weaponSprite != null) {
+			ctx.globalAlpha = 0.9;
+			ctx.save();
+			ctx.translate(0, -baseWeapon.yOffset + baseWeapon.holdDist);
+			drawSprite(
+				ctx,
+				weaponSprite,
+				-(baseWeapon.width / 2),
+				0,
+				baseWeapon.width,
+				baseWeapon.length,
+				0,
+				false,
+				0,
+				0,
+				0,
+			);
+			ctx.translate(0, -baseWeapon.holdDist + 10);
+			if (armSprite != null) {
+				ctx.translate(10, -13);
+				ctx.rotate(0.7);
+				drawSprite(ctx, armSprite, 0, 0, 8, 32, 0, false, 0, 0, 0);
+				ctx.rotate(-0.7);
+				ctx.translate(-28, -1);
+				ctx.rotate(-0.25);
+				drawSprite(ctx, armSprite, 0, 0, 8, 32, 0, false, 0, 0, 0);
+				ctx.rotate(0.25);
+			}
+			ctx.restore();
+			ctx.globalAlpha = 1;
+		}
+	}
+	ctx.restore();
+}
+
 function drawFlag(flg: FlagObject) {
 	flg.ac--;
 	if (flg.ac <= 0) {
@@ -2799,12 +3053,37 @@ function drawClutter(clt: ClutterObject) {
 	}
 }
 
+type GameObjectRenderEntry =
+	| { data: Player; type: "player" }
+	| { data: ClutterObject; type: "clutter" }
+	| { data: FlagObject; type: "flag" };
+// persistent pooled list: refilled and sorted in place every frame so no
+// per-frame array/wrapper allocations (sort is stable, same tie-order as toSorted)
+const gameObjectRenderList: GameObjectRenderEntry[] = [];
 function getGameObjectRenderData() {
-	return [
-		...st.players.map((player) => ({ data: player, type: "player" as const })),
-		...clutter.map((clutter) => ({ data: clutter, type: "clutter" as const })),
-		...flags.map((flag) => ({ data: flag, type: "flag" as const })),
-	].toSorted((a, b) => a.data.y - b.data.y);
+	const total = st.players.length + clutter.length + flags.length;
+	while (gameObjectRenderList.length < total) {
+		gameObjectRenderList.push({ data: null as unknown as Player, type: "player" });
+	}
+	gameObjectRenderList.length = total;
+	let n = 0;
+	for (const player of st.players) {
+		const entry = gameObjectRenderList[n++] as { data: Player; type: string };
+		entry.data = player;
+		entry.type = "player";
+	}
+	for (const clt of clutter) {
+		const entry = gameObjectRenderList[n++] as { data: ClutterObject; type: string };
+		entry.data = clt;
+		entry.type = "clutter";
+	}
+	for (const flag of flags) {
+		const entry = gameObjectRenderList[n++] as { data: FlagObject; type: string };
+		entry.data = flag;
+		entry.type = "flag";
+	}
+	gameObjectRenderList.sort((a, b) => a.data.y - b.data.y);
+	return gameObjectRenderList;
 }
 
 function drawGameObjects(delta: number) {

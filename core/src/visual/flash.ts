@@ -41,6 +41,7 @@ for (let i = 0; i < 30; ++i) {
 }
 export function updateFlashGlows(delta: number) {
 	for (const glow of flashGlows) {
+		if (!glow.active) continue;
 		glow.update(delta);
 		glow.draw();
 	}

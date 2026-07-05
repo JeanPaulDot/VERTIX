@@ -379,15 +379,6 @@ div {
 	font-size: 18px;
 }
 
-#startMenu p {
-	padding: 0;
-	text-align: center;
-	font-size: 16px;
-	color: var(--gray);
-	margin-top: 0px;
-	margin-bottom: 10px;
-}
-
 .menuTextInput {
 	width: 100%;
 	padding: 5px;
@@ -502,16 +493,6 @@ div {
 	background: var(--setting-active-blue);
 	outline: none;
 	box-shadow: none;
-}
-
-#startMenu ul {
-	margin-left: 10px;
-	margin-right: 10px;
-	margin-top: 0;
-	margin-bottom: 0px;
-	padding: 10px;
-	font-size: 14px;
-	color: rgba(0, 0, 0, 0.5);
 }
 
 .modeVoteButton {
@@ -629,12 +610,73 @@ div {
 #startMenuWrapper {
 	pointer-events: none;
 	z-index: 2;
-	width: 1050px;
 	position: absolute;
-	top: 45%;
-	left: 50%;
-	margin-right: -50%;
-	transform: translate(-50%, -50%) scale(1);
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	box-sizing: border-box;
+	/* extra top padding keeps the pinned account chip clear of the title when content overflows */
+	padding: 84px 20px 40px;
+	overflow-y: auto;
+	overflow-x: hidden;
+}
+/* below 900px the account chip flows above the menu instead of being pinned (see AccountChip.svelte) */
+@media (max-width: 900px) {
+	#startMenuWrapper {
+		padding: 20px;
+	}
+}
+
+/* margin:auto (not justify-content:center) so tall content stays scrollable instead of clipping at the top */
+#menuCenter {
+	margin: auto;
+	width: 100%;
+	max-width: 1240px;
+	display: flex;
+	flex-direction: column;
+	gap: 24px;
+	align-items: center;
+}
+
+#menuCards {
+	display: flex;
+	gap: 14px;
+	align-items: stretch;
+	justify-content: center;
+	flex-wrap: wrap;
+	width: 100%;
+}
+
+.menuCard {
+	flex: 1 1 320px;
+	min-width: 300px;
+	max-width: 400px;
+	padding: 20px;
+	border-radius: 1px;
+	background-color: var(--white);
+	box-sizing: border-box;
+	pointer-events: auto;
+	box-shadow: inset 0 -5px #e0e0e0;
+	display: flex;
+	flex-direction: column;
+	font-size: 16px;
+	color: rgba(0, 0, 0, 0.4);
+}
+#playCard {
+	flex-basis: 360px;
+	max-width: 380px;
+}
+
+.menuModalContent {
+	width: min(420px, 85vw);
+	font-size: 16px;
+	color: rgba(0, 0, 0, 0.4);
+}
+.menuModalScroll {
+	max-height: 60vh;
+	overflow-y: auto;
+	overflow-x: hidden;
+	line-height: 200%;
 }
 
 #mobileMessage {
@@ -658,9 +700,10 @@ div {
 }
 
 #mainTitleText {
+	flex: none;
 	width: 100%;
 	color: var(--white);
-	font-size: 96px;
+	font-size: clamp(42px, 7vw, 96px);
 	text-align: center;
 	text-shadow:
 		0 1px 0 #e0e0e0,
@@ -671,75 +714,30 @@ div {
 		0 6px 0 #e0e0e0;
 }
 
-#startMenu {
-	width: 30.5%;
-	padding: 20px;
-	float: none; /*left;*/
-	border-radius: 1px;
-	background-color: white;
-	box-sizing: border-box;
-	margin-bottom: 10px;
-	display: inline-block;
-	vertical-align: top;
-	pointer-events: auto;
-	box-shadow: inset 0 -5px #e0e0e0;
-}
-
-#roomWrapper {
-	width: 35.5%;
-	float: left;
-	margin-bottom: 10px;
-	margin-right: 10px;
-	padding: 20px;
-	border-radius: 1px;
-	vertical-align: top;
-	background-color: white;
-	box-sizing: border-box;
-	pointer-events: auto;
-	box-shadow: inset 0 -5px #e0e0e0;
-}
-
-#rightMenu {
-	width: 32%;
-	float: right;
-	margin-left: 10px;
-	padding: 20px;
-	border-radius: 1px;
-	vertical-align: top;
-	background-color: white;
-	box-sizing: border-box;
-	font-size: 16px;
-	color: rgba(0, 0, 0, 0.4);
-	pointer-events: auto;
-	box-shadow: inset 0 -5px #e0e0e0;
-}
-
 #linkBoxRight {
-	font-size: 14px;
-	color: var(--gray);
 	z-index: 1000;
 	position: absolute;
 	bottom: 0;
 	right: 0;
-	background-color: var(--white);
-	border-radius: 1px 0px 0px 0px;
-	padding: 5px 10px;
-	box-sizing: border-box;
-	text-align: center;
 }
 
-#linkBoxLeft {
+#discordButton {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 	font-size: 14px;
-	color: var(--gray);
-	z-index: 1000;
-	position: absolute;
-	bottom: 0;
-	left: 0;
-	background-color: var(--white);
-	border-radius: 0px 1px 0px 0px;
-	padding: 5px 10px;
-	box-sizing: border-box;
-	text-align: center;
+	font-weight: bold;
+	color: #fff;
+	background-color: #5865f2;
+	border-radius: 4px 0px 0px 0px;
+	padding: 8px 14px;
+	text-decoration: none;
+	transition: background-color 0.15s;
+}
+
+#discordButton:hover {
+	background-color: #4752c4;
+	text-decoration: none;
 }
 
 .playerStatClick {

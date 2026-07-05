@@ -40,6 +40,8 @@ export type Player = {
 	isBoss: boolean;
 	loggedIn?: boolean;
 	socketId?: string;
+	// server-controlled AI player (no socket); never writes stats
+	isBot?: boolean;
 	likedBy: number[];
 	totalDamage: number;
 	totalHealing: number;
@@ -122,6 +124,7 @@ export type Account = {
 	clan?: string;
 	rank: number; // note: even guests have a rank for a given session
 	rankPercent?: number;
+	score?: number; // lifetime score (projected with in-round score during a game)
 	worldRank?: number;
 	likes?: number;
 	kills?: number;
@@ -133,6 +136,7 @@ export type Account = {
 
 	hat?: Hat;
 	shirt?: Shirt;
+	pendingCrates?: number;
 };
 
 export type Spray = {
@@ -307,6 +311,7 @@ export type PlayerProfile = {
 };
 
 export type ClanProfile = {
+	id: number;
 	name: string;
 	position: number;
 	rank: number;

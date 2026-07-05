@@ -36,6 +36,9 @@ export class Projectile {
 	trailAlpha = 0;
 	owner: Player | null = null;
 	dmg = 0;
+	// client render bookkeeping: whether the bullet was active before this frame's
+	// physics step, so the sprite pass (which runs later) can draw the final frame
+	wasActiveThisFrame = false;
 	hitClutter: number[] = [];
 	hitPlayers: number[] = [];
 	playerImmunity: Record<number, number> = {};
@@ -63,8 +66,8 @@ export class Projectile {
 				this.startTime = currentTime;
 			}
 
-			this.hitClutter = [];
-			this.hitPlayers = [];
+			this.hitClutter.length = 0;
+			this.hitPlayers.length = 0;
 
 			for (let updateStep = 0; updateStep < this.updateAccuracy; ++updateStep) {
 				let vel = this.speed * delta;
@@ -227,8 +230,8 @@ export class Projectile {
 	}
 	activate() {
 		this.skipMove = true;
-		this.hitClutter = [];
-		this.hitPlayers = [];
+		this.hitClutter.length = 0;
+		this.hitPlayers.length = 0;
 		this.playerImmunity = {};
 		this.active = true;
 		if (typeof window !== "undefined") playSound(`shot${this.weaponIndex}`, this.x, this.y);

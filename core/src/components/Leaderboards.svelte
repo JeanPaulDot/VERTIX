@@ -1,74 +1,21 @@
 <script lang="ts">
 	import { onMount } from "svelte";
-	import type { ClanProfile, LeaderboardData, LeaderboardEntry, LeaderboardType, PlayerProfile } from "../types";
+	import {
+		emptyLeaderboardUIData,
+		fetchLeaderboards,
+		LB_TYPES_FRIENDLY_NAMES,
+		openLeaderboardEntry,
+		type LeaderboardUIData,
+	} from "../leaderboardData.ts";
+	import type { LeaderboardType } from "../types";
 	import NavigationBar from "./NavigationBar.svelte";
 
-	const LB_TYPES_FRIENDLY_NAMES: Record<LeaderboardType, string> = {
-		rank: "Rank",
-		kdrThousand: "KDR (1000+)",
-		kdrAny: "KDR (Any)",
-		kills: "Kills",
-		clanRank: "Clans (Rank)",
-		clanKdr: "Clans (KDR)",
-	};
-
 	let selectedLeaderboardType: LeaderboardType = $state("rank");
-	let leaderboardUIData: Record<LeaderboardType, LeaderboardEntry[]> = $state({
-		rank: [],
-		kdrThousand: [],
-		kdrAny: [],
-		kills: [],
-		clanRank: [],
-		clanKdr: [],
-	});
+	let leaderboardUIData: LeaderboardUIData = $state(emptyLeaderboardUIData());
 	const selectedLeaderboard = $derived(leaderboardUIData[selectedLeaderboardType]);
 
-	function getBasePlayerLeaderboardEntry(player: PlayerProfile) {
-		return {
-			clanText: player.clan ? `[${player.clan.toUpperCase()}]` : "",
-			link: `/profile.html?${player.name}`,
-		};
-	}
-
-	function getPlayerKdrLeaderboardEntry(player: PlayerProfile) {
-		return {
-			...getBasePlayerLeaderboardEntry(player),
-			text: `${player.name} KDR ${player.kdr.toFixed(2)} (${player.numKills}/${player.numDeaths})`,
-		};
-	}
-
-	function getClanLeaderboardEntry(clan: ClanProfile) {
-		return {
-			clanText: `[${clan.name}] (${clan.numMembers} members)`,
-			text: `RNK ${clan.rank} KDR ${clan.kdr.toFixed(2)}`,
-		};
-	}
-
-	function onClickLeaderboardEntry(leaderboardEntry: LeaderboardEntry) {
-		if (leaderboardEntry.link) {
-			window.open(leaderboardEntry.link, "_blank");
-		}
-	}
-
 	onMount(async () => {
-		const res = await fetch("/api/getLbs");
-		const leaderboardData: LeaderboardData = await res.json();
-
-		leaderboardUIData.rank = leaderboardData.rank.map((player) => ({
-			...getBasePlayerLeaderboardEntry(player),
-			text: `${player.name} RNK ${player.rank}`,
-		}));
-
-		leaderboardUIData.kdrThousand = leaderboardData.kdrThousand.map(getPlayerKdrLeaderboardEntry);
-		leaderboardUIData.kdrAny = leaderboardData.kdrAny.map(getPlayerKdrLeaderboardEntry);
-
-		leaderboardUIData.kills = leaderboardData.kills.map((player) => ({
-			...getBasePlayerLeaderboardEntry(player),
-			text: `${player.name} ${player.numKills} KILLS`,
-		}));
-
-		leaderboardUIData.clanRank = leaderboardData.clanRank.map(getClanLeaderboardEntry);
-		leaderboardUIData.clanKdr = leaderboardData.clanKdr.map(getClanLeaderboardEntry);
+		leaderboardUIData = await fetchLeaderboards();
 	});
 </script>
 <NavigationBar currentPage="leaderboards" />
@@ -87,7 +34,7 @@
 			{/each}
 			<div class="leaderboardContainer">
 				{#each selectedLeaderboard as entry, i}
-					<div class="leaderboardItemWrapper" onclick={() => onClickLeaderboardEntry(entry)}>
+					<div class="leaderboardItemWrapper" onclick={() => openLeaderboardEntry(entry)}>
 						{i + 1}.
 						<span class="clanDisplay">{entry.clanText}</span>
 						<span class="leaderNameDisplay">{entry.text}</span>

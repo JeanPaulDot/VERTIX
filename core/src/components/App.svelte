@@ -1,14 +1,31 @@
 <script lang="ts">
 	import { st } from "../state.svelte.ts";
 	import { getCurrentWeapon } from "../utils.ts";
+	import AccountChip from "./AccountChip.svelte";
+	import AccountWidget from "./AccountWidget.svelte";
 	import ActionBar from "./ActionBar.svelte";
 	import Chatbox from "./Chatbox.svelte";
-	import DropUpLink from "./DropUpLink.svelte";
+	import Controls from "./Controls.svelte";
 	import GameStatsTable from "./GameStatsTable.svelte";
-	import RightMenu from "./RightMenu.svelte";
+	import LoadoutCard from "./LoadoutCard.svelte";
+	import Modal from "./common/Modal.svelte";
+	import RewardPopup from "./RewardPopup.svelte";
 	import RoomList from "./RoomList.svelte";
+	import Settings from "./Settings.svelte";
 	import StartMenu from "./StartMenu.svelte";
+	import ModTab from "./tabs/ModTab.svelte";
+	import RewardsTab from "./tabs/RewardsTab.svelte";
+
+	function closeMenuModal() {
+		st.menuModal = null;
+	}
+
+	// picking a room starts a join — close the browser so the play card's status is visible
+	$effect(() => {
+		if (st.changingLobby && st.menuModal === "rooms") st.menuModal = null;
+	});
 </script>
+<RewardPopup />
 <div id="mobileMessage"></div>
 <div id="gameAreaWrapper">
 	<div id="chatbox"><Chatbox /></div>
@@ -50,6 +67,7 @@
 			</tbody>
 		</table>
 		<div id="gameModeText"></div>
+		<AccountChip inGame />
 	</div>
 	<div id="conStatContainer">
 		<div id="pingText" class="gameDevStat">PING 0</div>
@@ -82,66 +100,38 @@
 <div id="escMenuWrapper"></div>
 
 <div id="startMenuWrapper">
-	<div id="mainTitleText">VERTIX ONLINE</div>
-	<div id="roomWrapper"><RoomList /></div>
-	<div id="startMenu"><StartMenu /></div>
+	<AccountChip />
+	<div id="menuCenter">
+		<div id="mainTitleText">VERTIX ONLINE</div>
+		<div id="menuCards">
+			<div class="menuCard" id="rewardsCard"><RewardsTab /></div>
+			<div class="menuCard" id="playCard"><StartMenu /></div>
+			<div class="menuCard" id="loadoutCard"><LoadoutCard /></div>
+		</div>
+	</div>
 
-	<!-- RIGHT MENU -->
-	<div id="rightMenu"><RightMenu /></div>
+	<!-- MAIN MENU MODALS: reuse the existing panels, shown on demand -->
+	<Modal open={st.menuModal === "rooms"} onclose={closeMenuModal}>
+		<div class="menuModalContent"><RoomList /></div>
+	</Modal>
+	<Modal open={st.menuModal === "settings"} title="SETTINGS" onclose={closeMenuModal}>
+		<div class="menuModalContent menuModalScroll"><Settings /></div>
+	</Modal>
+	<Modal open={st.menuModal === "controls"} title="CONTROLS" onclose={closeMenuModal}>
+		<div class="menuModalContent menuModalScroll"><Controls /></div>
+	</Modal>
+	<Modal open={st.menuModal === "mods"} onclose={closeMenuModal}>
+		<div class="menuModalContent"><ModTab /></div>
+	</Modal>
+	<Modal open={st.menuModal === "account"} onclose={closeMenuModal} scrollable={false}>
+		<div class="menuModalContent"><AccountWidget /></div>
+	</Modal>
 </div>
 <div id="linkBoxRight">
-	<DropUpLink title="MODS">
-		<li>
-			<a
-				target="_blank"
-				href="https://www.reddit.com/r/VertixOnline/comments/43ol5a/texture_mods_please_post_all_texture_mods_here/"
-			>
-				FIND A MOD
-			</a>
-		</li>
-		<li>
-			<a target="_blank" href="https://www.reddit.com/r/VertixOnline/comments/444pzc/guide_how_to_make_a_mod/">
-				MAKE A MOD
-			</a>
-		</li>
-	</DropUpLink>
-	|
-	<DropUpLink title="COMMUNITY">
-		<li><a target="_blank" href="">FORUM</a></li>
-		<li><a target="_blank" href="">FACEBOOK</a></li>
-		<li><a target="_blank" href="">DISCORD</a></li>
-		<li><a target="_blank" href="">YOUTUBE</a></li>
-	</DropUpLink>
-	|
-	<DropUpLink title="OTHER">
-		<li>
-			<a target="_blank" href="https://www.reddit.com/r/VertixOnline/wiki/index"> WIKI </a>
-		</li>
-		<li><a target="_blank" href="./terms.txt">TERMS OF USE</a></li>
-		<li><a target="_blank" href="./privacy.txt">PRIVACY POLICY</a></li>
-		<li><a target="_blank" href="./versions.txt">VERSION HISTORY</a></li>
-	</DropUpLink>
-	| <a target="_blank" href="./versions.txt">V3.8 (CHANGELOG)</a>
-</div>
-<div id="linkBoxLeft">
-	THANKS FOR PLAYING! |
-	<DropUpLink title="DONATE">
-		<div style="width: 200px; color: rgba(0, 0, 0, 0.6);">
-			PLEASE CONSIDER DONATING TO ONE OF
-			<a target="_blank" href="./donate.html">THESE</a>
-			CHARITIES.
-		</div>
-	</DropUpLink>
-	|
-	<DropUpLink title="SHARE">
-		<li><a target="_blank" href="https://www.facebook.com/sharer.php?u=https://vertix.io"> FACEBOOK </a></li>
-		<li>
-			<a
-				target="_blank"
-				href="https://twitter.com/share?url=https://vertix.io&amp;text=Check out&amp;hashtags=vertix.io"
-			>
-				TWITTER
-			</a>
-		</li>
-	</DropUpLink>
+	<a id="discordButton" target="_blank" href="https://discord.gg/pDwBzzd">
+		<svg viewBox="0 0 127.14 96.36" width="20" height="20" fill="currentColor" aria-hidden="true">
+			<path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.25,60,73.25,53s5-12.74,11.44-12.74S96.23,46,96.12,53,91.08,65.69,84.69,65.69Z"/>
+		</svg>
+		<span>JOIN THE DISCORD</span>
+	</a>
 </div>

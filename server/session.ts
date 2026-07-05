@@ -3,11 +3,18 @@ import { SignJWT, jwtVerify } from "jose";
 const SESSION_COOKIE = "vertix_session";
 const MAX_AGE = 7 * 24 * 60 * 60; // 7 days in seconds
 
+// resolved eagerly at import time so a missing/weak secret crashes the
+// server on boot instead of surfacing later as silently-rejected sessions
+const secretEnv = process.env.SESSION_SECRET;
+if (!secretEnv || secretEnv.length < 32) {
+	throw new Error(
+		"SESSION_SECRET env var missing or too short (min 32 chars) — see .env.example",
+	);
+}
+const SECRET = new TextEncoder().encode(secretEnv);
+
 function getSecret(): Uint8Array {
-	const secret = process.env.SESSION_SECRET;
-	if (secret) return new TextEncoder().encode(secret);
-	// Fallback for dev — NOT secure for production
-	return new TextEncoder().encode("dev-session-secret-change-in-production");
+	return SECRET;
 }
 
 export function isProduction(): boolean {

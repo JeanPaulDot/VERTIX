@@ -1,15 +1,29 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { secureHeaders } from "hono/secure-headers";
+import { bodyLimit } from "hono/body-limit";
 import { Server, type Socket } from "socket.io";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { gameModes } from "core/src/gamemodes.ts";
-import type { ClanProfile } from "core/src/types.ts";
 import { Room, rooms } from "./room.ts";
 import { createRateLimiter, createConnectionLimiter } from "./security.ts";
-import { initDb, getLeaderboard, getProfile } from "./db.ts";
+import {
+	initDb,
+	getLeaderboard,
+	getClanLeaderboard,
+	getProfile,
+	getAllUserScores,
+	findClanByName,
+	getClanStats,
+	findUserById,
+	findUserByUsername,
+	getDiscordConnectedUsers,
+} from "./db.ts";
+import { validateSession } from "./session.ts";
+import { checkForNewUnlocks, getUserUnlockedItems } from "./unlocks.ts";
 import {
 	setupAuthHandlers,
 	setupProfileHandler,
@@ -21,11 +35,23 @@ import { createOAuthRoutes } from "./oauth.ts";
 
 initDb();
 
+// one-off backfill: unlock whatever every existing account's current lifetime
+// score already qualifies for, so switching on enforcement doesn't suddenly
+// lock people out of cosmetics they were already using freely
+for (const { user_id, score } of getAllUserScores()) {
+	checkForNewUnlocks(user_id, score);
+}
+
 const allowedOrigins = process.env.CORS_ORIGINS
-	? process.env.CORS_ORIGINS.split(",")
+	? process.env.CORS_ORIGINS.split(",").map((origin) => origin.trim())
 	: ["http://localhost:4173", "http://localhost:5173", "http://localhost:1118"];
 
+if (process.env.NODE_ENV === "production" && allowedOrigins.includes("*")) {
+	throw new Error("CORS_ORIGINS must not contain '*' in production");
+}
+
 const createRoomLimiter = createRateLimiter(3, 60000);
+const profileLimiter = createRateLimiter(30, 60000);
 const connectionLimiter = createConnectionLimiter(5);
 
 const io = new Server({
@@ -82,6 +108,13 @@ io.on("connection", (socket: Socket) => {
 
 const api = new Hono();
 
+api.use(secureHeaders());
+api.use(
+	bodyLimit({
+		maxSize: 150 * 1024, // a max-size (64x64) genData upload JSON-encodes to ~65KB; isValidGenData bounds it further
+		onError: (c) => c.json({ error: "Request body too large" }, 413),
+	}),
+);
 api.use(
 	cors({
 		origin: allowedOrigins,
@@ -141,7 +174,7 @@ api.post("/createRoom", async (c) => {
 	const room = new Room(io, code);
 	room.isPermanent = false;
 	room.hostSecret = hostSecret;
-	room.configure({
+	const mapAccepted = room.configure({
 		...data,
 		srvModes:
 			data.srvModes?.length > 0 ? data.srvModes : [gameModes.findIndex((m) => m.code === "ffa")],
@@ -149,14 +182,16 @@ api.post("/createRoom", async (c) => {
 	rooms.push(room);
 	room.handleSocket();
 
-	return c.json({ room: code, hostSecret });
+	return c.json({ room: code, hostSecret, mapRejected: !mapAccepted });
 });
 
 api.get("/getRooms", (c) => {
 	const list = rooms.map((r) => ({
 		n: r.name,
 		m: r.game.mode.code,
-		pl: r.game.players.length,
+		// humans only: bots yield their slot when a real player joins, so
+		// counting them would make rooms look fuller than they are
+		pl: r.game.players.filter((p) => !p.isBot).length,
 		mxpl: r.game.maxPlayers,
 		lb: r.game.score.lb,
 	}));
@@ -174,38 +209,143 @@ api.get("/getLbs", (c) => {
 		kdrThousand,
 		kdrAny,
 		kills,
-		clanRank: [] as ClanProfile[],
-		clanKdr: [] as ClanProfile[],
+		clanRank: getClanLeaderboard("rank", 50),
+		clanKdr: getClanLeaderboard("kdr", 50),
 	});
 });
 
+api.get("/friends", async (c) => {
+	// players in rooms right now (humans only — bots aren't friends)
+	const online = rooms.flatMap((r) =>
+		r.game.players
+			.filter((p) => !p.isBot && p.name !== "UNKNOWN")
+			.map((p) => ({
+				name: p.name,
+				room: r.name,
+				mode: r.game.mode.code,
+			})),
+	);
+
+	// the Discord directory is only visible to players who linked Discord
+	// themselves — that's the "friend graph" this feature is built around
+	const session = await validateSession(c.req.header("Cookie"));
+	const self = session ? findUserById(session.userId) : undefined;
+	let discord: { username: string; discordName: string; avatar: string; online: boolean }[] | null =
+		null;
+	if (self?.discord_id) {
+		const onlineNames = new Set(online.map((p) => p.name));
+		discord = getDiscordConnectedUsers()
+			.filter((u) => u.username !== self.username)
+			.map((u) => ({
+				username: u.username,
+				discordName: u.discord_username,
+				avatar: u.discord_avatar,
+				online: onlineNames.has(u.username),
+			}));
+	}
+
+	return c.json({
+		online,
+		discord,
+		selfDiscordConnected: !!self?.discord_id,
+		loggedIn: !!session,
+	});
+});
+
+api.get("/clans", (c) => {
+	// getClanLeaderboard already computes stats for every clan and only slices
+	// to `limit` at the end, so a large limit gives us the full directory
+	return c.json(getClanLeaderboard("rank", 500));
+});
+
+api.get("/clan/:name", (c) => {
+	const clan = findClanByName(c.req.param("name"));
+	if (!clan) return c.json({ error: "Clan not found" }, 404);
+	const stats = getClanStats(clan.id);
+	if (!stats) return c.json({ error: "Clan not found" }, 404);
+	return c.json({ name: clan.name, ...stats });
+});
+
 api.get("/profile/:username", (c) => {
+	const clientIp = c.req.header("x-forwarded-for") ?? c.req.header("x-real-ip") ?? "unknown";
+	if (!profileLimiter(clientIp)) {
+		return c.json({ error: "Rate limit exceeded" }, 429);
+	}
 	const profile = getProfile(c.req.param("username"));
 	if (!profile) return c.json({ error: "Player not found" }, 404);
-	return c.json(profile);
+	// unlocked cosmetics double as the profile page's public achievement list
+	const user = findUserByUsername(c.req.param("username"));
+	const unlocks = user ? getUserUnlockedItems(user.id) : [];
+	return c.json({ ...profile, unlocks });
 });
 
 // root app: API mounted under /api, static files (production) at /
 const app = new Hono();
 app.route("/api", api);
 
+const MIME: Record<string, string> = {
+	".html": "text/html",
+	".js": "application/javascript",
+	".css": "text/css",
+	".json": "application/json",
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".gif": "image/gif",
+	".svg": "image/svg+xml",
+	".ico": "image/x-icon",
+	".ttf": "font/ttf",
+	".woff": "font/woff",
+	".woff2": "font/woff2",
+	".zip": "application/zip",
+};
+
+// mod packs are served in dev too (the vite dev server proxies /mods here);
+// default resolves relative to this file so it works regardless of cwd
+const serverDir = path.dirname(fileURLToPath(import.meta.url));
+const modsDir = process.env.DATA_DIR
+	? path.resolve(process.env.DATA_DIR, "mods")
+	: path.resolve(serverDir, "../data/mods");
+
+app.all("/mods/*", (c) => {
+	const urlPath = decodeURIComponent(new URL(c.req.url).pathname);
+	const filePath = path.join(modsDir, urlPath.replace("/mods/", ""));
+	// keep resolved paths inside the mods directory
+	if (!path.resolve(filePath).startsWith(path.resolve(modsDir))) {
+		return c.json({ error: "Mod not found" }, 404);
+	}
+	if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+		return c.json({ error: "Mod not found" }, 404);
+	}
+	const stat = fs.statSync(filePath);
+	const ext = path.extname(filePath);
+	const contentType = MIME[ext] || "application/octet-stream";
+	const range = c.req.header("range");
+
+	if (range) {
+		const parts = range.replace(/bytes=/, "").split("-");
+		const start = Number.parseInt(parts[0], 10);
+		const end = parts[1] ? Number.parseInt(parts[1], 10) : stat.size - 1;
+		const chunkSize = end - start + 1;
+		const buffer = Buffer.alloc(chunkSize);
+		const fd = fs.openSync(filePath, "r");
+		fs.readSync(fd, buffer, 0, chunkSize, start);
+		fs.closeSync(fd);
+		c.header("Content-Range", `bytes ${start}-${end}/${stat.size}`);
+		c.header("Content-Length", chunkSize.toString());
+		c.header("Content-Type", contentType);
+		c.header("Accept-Ranges", "bytes");
+		return c.body(buffer, 206);
+	}
+
+	c.header("Content-Length", stat.size.toString());
+	c.header("Content-Type", contentType);
+	c.header("Accept-Ranges", "bytes");
+	return c.body(fs.readFileSync(filePath));
+});
+
 // Production: serve frontend static files
 if (process.env.NODE_ENV === "production") {
 	const distDir = path.resolve(process.cwd(), "core/dist");
-	const MIME: Record<string, string> = {
-		".html": "text/html",
-		".js": "application/javascript",
-		".css": "text/css",
-		".json": "application/json",
-		".png": "image/png",
-		".jpg": "image/jpeg",
-		".gif": "image/gif",
-		".svg": "image/svg+xml",
-		".ico": "image/x-icon",
-		".ttf": "font/ttf",
-		".woff": "font/woff",
-		".woff2": "font/woff2",
-	};
 
 	app.get("/*", (c) => {
 		const urlPath = new URL(c.req.url).pathname;
