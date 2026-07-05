@@ -144,15 +144,17 @@ Open http://localhost:5173
    ```
    NODE_ENV=production
    SESSION_SECRET=<random-64-char-string>
-   CORS_ORIGINS=https://your-domain.com
+   CORS_ORIGINS=https://vertix.fr
    ```
 
 2. (Optional) Set up Discord OAuth:
    ```
    DISCORD_CLIENT_ID=your-app-id
    DISCORD_CLIENT_SECRET=your-secret
-   DISCORD_REDIRECT_URI=https://your-domain.com/api/auth/discord/callback
+   DISCORD_REDIRECT_URI=https://vertix.fr/api/auth/discord/callback
    ```
+   The redirect URI must be the same origin players open the game on and must be
+   registered in the [Discord developer portal](https://discord.com/developers/applications).
 
 3. Create the external network and start:
    ```bash

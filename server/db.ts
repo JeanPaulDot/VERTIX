@@ -124,18 +124,6 @@ export function getDb(): Database.Database {
 
 // --- User queries ---
 
-export function createUser(
-	username: string,
-	email: string,
-	passwordHash: string,
-): { id: number; username: string } {
-	const stmt = getDb().prepare(
-		"INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
-	);
-	const result = stmt.run(username, email, passwordHash);
-	return { id: Number(result.lastInsertRowid), username };
-}
-
 export function findUserByUsername(username: string) {
 	return getDb().prepare("SELECT * FROM users WHERE username = ?").get(username) as
 		| {
@@ -147,17 +135,6 @@ export function findUserByUsername(username: string) {
 				shirt_id: number;
 				channel: string;
 				created_at: string;
-		  }
-		| undefined;
-}
-
-export function findUserByEmail(email: string) {
-	return getDb().prepare("SELECT * FROM users WHERE email = ?").get(email) as
-		| {
-				id: number;
-				username: string;
-				email: string;
-				password_hash: string;
 		  }
 		| undefined;
 }

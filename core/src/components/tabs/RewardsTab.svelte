@@ -23,6 +23,16 @@
 	}
 </script>
 
+{#if !st.loggedIn}
+	<!-- quests/rewards require an account -->
+	<div class="questsLocked">
+		<h3 class="menuHeaderTabbed2">QUESTS &amp; REWARDS</h3>
+		<p>Log in with Discord to complete daily quests, keep a login streak, and earn reward crates.</p>
+		<button type="button" class="smallMenuButton" onclick={() => (st.menuModal = "account")}>
+			LOG IN
+		</button>
+	</div>
+{:else}
 <!-- DAILY QUESTS -->
 <div class="cardHeaderRow">
 	<h3 class="menuHeaderTabbed2">DAILY QUESTS</h3>
@@ -88,8 +98,18 @@
 		>{s.label}</div>
 	{/each}
 </div>
+{/if}
 
 <style>
+	.questsLocked {
+		text-align: center;
+	}
+	.questsLocked p {
+		font-size: 12px;
+		color: rgba(0, 0, 0, 0.55);
+		line-height: 1.4;
+		margin: 8px 0 12px;
+	}
 	.cardHeaderRow {
 		display: flex;
 		justify-content: space-between;

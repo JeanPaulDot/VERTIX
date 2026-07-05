@@ -414,6 +414,26 @@ export function getItemRarityColor(chance: number) {
 		return "#9d9d9d";
 	}
 }
+// 0 = common … 4 = legendary; mirrors the color tiers in getItemRarityColor.
+// Used to scale the crate-reveal animations (rarer = flashier).
+export function getItemRarityTier(chance: number): 0 | 1 | 2 | 3 | 4 {
+	if (chance <= 1) return 4;
+	if (chance <= 6) return 3;
+	if (chance <= 18) return 2;
+	if (chance <= 45) return 1;
+	return 0;
+}
+
+export function getItemRarityName(chance: number): string {
+	return ["Common", "Uncommon", "Rare", "Epic", "Legendary"][getItemRarityTier(chance)];
+}
+
+// Display-image URL for a cosmetic, matching how hats/shirts/camos are served
+// under /images (camos are a flat file, hats/shirts use the down-facing sprite).
+export function getCosmeticImageUrl(type: "hat" | "shirt" | "camo", id: number): string {
+	return type === "camo" ? `/images/camos/${id}.png` : `/images/${type}s/${id}/d.png`;
+}
+
 // mirrors the RARITY_TIERS score thresholds in server/unlocks.ts — display
 // only, the server is the actual source of truth for what's unlockable
 export function getUnlockScoreThreshold(chance: number): number {

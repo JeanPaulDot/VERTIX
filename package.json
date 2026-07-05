@@ -1,6 +1,7 @@
 {
 	"scripts": {
-		"dev": "pnpm run --parallel --reporter-hide-prefix --color --recursive dev"
+		"dev": "pnpm run --parallel --reporter-hide-prefix --color --recursive dev",
+		"typecheck": "pnpm run --recursive typecheck"
 	},
 	"dependencies": {
 		"@biomejs/biome": "^2.4.15"

@@ -1,12 +1,8 @@
 import type { Socket } from "socket.io";
-import bcrypt from "bcrypt";
 import {
-	createUser,
 	findUserById,
 	findUserByUsername,
-	findUserByEmail,
 	getUserStats,
-	createEmptyStats,
 	getProfile,
 	findUserClanMembership,
 	findClanByName,
@@ -16,18 +12,14 @@ import {
 	deleteClan,
 	updateClanChatUrl,
 	getClanStats,
+	getUserUnlocks,
 	getUnopenedCrateCount,
 	popOldestUnopenedCrate,
 } from "./db.ts";
-import { createSessionCookie, validateSession } from "./session.ts";
-import { checkForNewUnlocks, openCrateForUser } from "./unlocks.ts";
-import { getQuestPayload, recordLogin, claimQuestReward, claimStreakRewardForUser } from "./quests.ts";
+import { validateSession } from "./session.ts";
+import { openCrateForUser } from "./unlocks.ts";
+import { getQuestPayload, claimQuestReward, claimStreakRewardForUser } from "./quests.ts";
 
-const BCRYPT_ROUNDS = 10;
-const MIN_PASS_LENGTH = 4;
-const MAX_PASS_LENGTH = 32;
-const MAX_NAME_LENGTH = 15;
-const MAX_EMAIL_LENGTH = 40;
 const MAX_CLAN_NAME_LENGTH = 4;
 const MAX_CHAT_URL_LENGTH = 100;
 
@@ -46,151 +38,9 @@ export interface AuthenticatedSocket extends Socket {
 	username?: string;
 }
 
-function validateUsername(username: unknown): string | null {
-	if (typeof username !== "string") return "Invalid username";
-	const trimmed = username.trim();
-	if (trimmed.length < 1 || trimmed.length > MAX_NAME_LENGTH) return "Username must be 1-15 characters";
-	if (!/^[a-zA-Z0-9_]+$/.test(trimmed)) return "Username can only contain letters, numbers, and underscores";
-	return null;
-}
-
-function validateEmail(email: unknown): string | null {
-	if (typeof email !== "string") return "Invalid email";
-	const trimmed = email.trim();
-	if (trimmed.length < 3 || trimmed.length > MAX_EMAIL_LENGTH) return "Invalid email";
-	if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) return "Invalid email format";
-	return null;
-}
-
-function validatePassword(pass: unknown): string | null {
-	if (typeof pass !== "string") return "Invalid password";
-	if (pass.length < MIN_PASS_LENGTH) return `Password must be at least ${MIN_PASS_LENGTH} characters`;
-	if (pass.length > MAX_PASS_LENGTH) return `Password must be at most ${MAX_PASS_LENGTH} characters`;
-	return null;
-}
-
+// Login is Discord-only (see oauth.ts). These socket handlers cover the
+// authenticated menu actions; the session cookie is what carries identity.
 export function setupAuthHandlers(socket: AuthenticatedSocket): void {
-	socket.on("dbLogin", async (data: { userName?: string; userPass?: string }) => {
-		const { userName, userPass } = data ?? {};
-
-		const nameError = validateUsername(userName);
-		if (nameError) {
-			socket.emit("logRes", nameError, false);
-			return;
-		}
-
-		const passError = validatePassword(userPass);
-		if (passError) {
-			socket.emit("logRes", passError, false);
-			return;
-		}
-
-		const user = findUserByUsername(userName!);
-		if (!user) {
-			socket.emit("logRes", "User not found", false);
-			return;
-		}
-
-		const match = await bcrypt.compare(userPass!, user.password_hash);
-		if (!match) {
-			socket.emit("logRes", "Incorrect password", false);
-			return;
-		}
-
-		const stats = getUserStats(user.id);
-		if (!stats) {
-			createEmptyStats(user.id);
-		}
-		const newlyUnlocked = checkForNewUnlocks(user.id, stats?.score ?? 0);
-
-		socket.userId = user.id;
-		socket.username = user.username;
-
-		const sessionCookie = await createSessionCookie(user.id, user.username);
-		socket.emit(
-			"logRes",
-			{
-				text: user.username,
-				logKey: `${user.id}-${Date.now()}`,
-				cookie: sessionCookie,
-			},
-			true,
-		);
-
-		if (newlyUnlocked.length > 0) socket.emit("unlockReveal", newlyUnlocked);
-		emitAccountStats(socket);
-		const loginResult = recordLogin(user.id);
-		if (loginResult.justCompletedStreak) {
-			socket.emit("streakComplete");
-		}
-	});
-
-	socket.on(
-		"dbReg",
-		async (data: { userName?: string; userEmail?: string; userPass?: string }) => {
-			const { userName, userEmail, userPass } = data ?? {};
-
-			const nameError = validateUsername(userName);
-			if (nameError) {
-				socket.emit("regRes", nameError, false);
-				return;
-			}
-
-			const emailError = validateEmail(userEmail);
-			if (emailError) {
-				socket.emit("regRes", emailError, false);
-				return;
-			}
-
-			const passError = validatePassword(userPass);
-			if (passError) {
-				socket.emit("regRes", passError, false);
-				return;
-			}
-
-			if (findUserByUsername(userName!)) {
-				socket.emit("regRes", "Username already taken", false);
-				return;
-			}
-
-			if (findUserByEmail(userEmail!)) {
-				socket.emit("regRes", "Email already registered", false);
-				return;
-			}
-
-			const hash = await bcrypt.hash(userPass!, BCRYPT_ROUNDS);
-			const newUser = createUser(userName!, userEmail!, hash);
-			createEmptyStats(newUser.id);
-			checkForNewUnlocks(newUser.id, 0);
-
-		socket.userId = newUser.id;
-		socket.username = newUser.username;
-
-		const sessionCookie = await createSessionCookie(newUser.id, newUser.username);
-		socket.emit(
-			"regRes",
-			`Registered as ${newUser.username}`,
-			true,
-		);
-
-		socket.emit(
-			"logRes",
-			{
-				text: newUser.username,
-				logKey: `${newUser.id}-${Date.now()}`,
-				cookie: sessionCookie,
-			},
-			true,
-		);
-
-			emitAccountStats(socket);
-			const loginResult = recordLogin(newUser.id);
-			if (loginResult.justCompletedStreak) {
-				socket.emit("streakComplete");
-			}
-		},
-	);
-
 	socket.on("getQuests", () => {
 		if (!socket.userId) {
 			socket.emit("questData", null);
@@ -237,10 +87,6 @@ export function setupAuthHandlers(socket: AuthenticatedSocket): void {
 	socket.on("dbLogout", () => {
 		socket.userId = undefined;
 		socket.username = undefined;
-	});
-
-	socket.on("dbRecov", (data: { userMail?: string }) => {
-		socket.emit("recovRes", "Password recovery is not yet implemented", false);
 	});
 
 	socket.on("dbEditUser", (data: { userName?: string; userChannel?: string }) => {
@@ -487,4 +333,19 @@ export function emitAccountStats(socket: AuthenticatedSocket): void {
 	const payload = buildAccountPayload(socket.userId, socket.username);
 	if (payload) socket.emit("updAccStat", payload);
 	emitClanStats(socket);
+}
+
+/**
+ * Push the logged-in account's owned cosmetics (hat/shirt/camo ids) so the client
+ * can enforce owned/locked state in the loadout. Shared by the root ("lobby")
+ * namespace and room joins so the menu works before entering a room.
+ */
+export function emitUnlocks(socket: AuthenticatedSocket): void {
+	if (!socket.userId) return;
+	const unlocks = getUserUnlocks(socket.userId);
+	socket.emit("updUnlocks", {
+		hat: unlocks.filter((u) => u.item_type === "hat").map((u) => u.item_id),
+		shirt: unlocks.filter((u) => u.item_type === "shirt").map((u) => u.item_id),
+		camo: unlocks.filter((u) => u.item_type === "camo").map((u) => u.item_id),
+	});
 }

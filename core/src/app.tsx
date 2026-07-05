@@ -3,10 +3,10 @@ import { io, type Socket } from "socket.io-client";
 import { flushSync, mount } from "svelte";
 import { resetCooldownAnimations } from "./components/ActionBar.svelte";
 import App from "./components/App.svelte";
-import { weaponNames, weapons } from "./loadouts.ts";
+import { weaponNames, weapons, characterClasses as baseCharacterClasses } from "./loadouts.ts";
 import { Projectile } from "./logic/projectile.ts";
 import { loadSounds, playSound, startSoundTrack, stopAllSounds } from "./sound.ts";
-import { st } from "./state.svelte.ts";
+import { st, type CrateWonItem } from "./state.svelte.ts";
 import type {
 	Account,
 	CachedSpriteData,
@@ -91,6 +91,12 @@ declare global {
 }
 window.startGame = startGame;
 async function startGame() {
+	if (st.startingGame || st.changingLobby) return;
+	// no room chosen by hand → autojoin the best available one and wait for its
+	// connection to settle, then fall through and enter the game in this same flow
+	if (!st.room) {
+		if (!(await autoJoinRoom())) return; // no rooms available; let the player pick manually
+	}
 	if (!st.startingGame && !st.changingLobby) {
 		st.startingGame = true;
 		st.playerName = st.playerName.replace(/(<([^>]+)>)/gi, "").substring(0, 25);
@@ -178,10 +184,28 @@ async function refreshLogin(): Promise<boolean> {
 		const room = st.room;
 		st.player.room = "";
 		joinRoom(room);
+	} else if (!st.room && !st.changingLobby) {
+		// in the menu (no room): reconnect the lobby socket so its handshake carries
+		// the fresh Discord session cookie. The server then authenticates it and
+		// pushes account/quests/unlocks for the now-logged-in user.
+		openLobby();
 	}
 	return true;
 }
 window.refreshLogin = refreshLogin;
+
+// The menu connects to the root ("lobby") namespace so account stats, quests and
+// owned cosmetics are available before joining a game room. joinRoom() closes this
+// socket and opens the room socket when the player actually enters a game.
+function openLobby() {
+	if (socket) socket.close();
+	// forceNew: give the lobby its own manager so closing it when we join a room
+	// (joinRoom) can't disturb the room socket's handshake (socket.io multiplexes
+	// same-origin namespaces over a shared connection by default)
+	socket = io({ forceNew: true });
+	st.socket = socket;
+	setupSocket(socket);
+}
 
 window.onload = async () => {
 	if (st.mobile) {
@@ -196,23 +220,52 @@ window.onload = async () => {
 		loadingWrapper.style.display = "none";
 	});
 
-	// only join automatically when the URL carries an explicit invite (?ROOMCODE);
-	// otherwise autojoin the best available room
+	// only join automatically when the URL carries an explicit invite (?ROOMCODE).
+	// otherwise we no longer autojoin on load: the player picks a room by hand from
+	// the browser, and autojoin is used purely as a fallback at ENTER GAME (see
+	// startGame) when no room was selected. the loadout is seeded from the local
+	// catalog so the menu is usable before any connection.
 	const roomName = location.search.substring(1) || "";
 	if (roomName) {
 		joinRoom(roomName);
 	} else {
-		// autojoin: fetch the best available room from the server
-		fetch("/api/autoJoin")
-			.then((r) => r.json())
-			.then((data: { room: string | null }) => {
-				if (data.room) {
-					joinRoom(data.room);
-				}
-			})
-			.catch(() => {});
+		// connect the lobby socket so a logged-in player's account/quests/unlocks
+		// load in the menu without joining a game room
+		openLobby();
 	}
 };
+
+// resolved by the "welcome" handler so autoJoinRoom can wait for the handshake
+let resolveRoomJoin: (() => void) | null = null;
+// fetch the best available room, join it, and wait until its "welcome" handshake
+// lands (so st.room and cosmetics/unlocks are ready). resolves false if no room
+// is joinable, so the ENTER button can recover instead of hanging.
+async function autoJoinRoom(): Promise<boolean> {
+	try {
+		const resp = await fetch("/api/autoJoin");
+		const data = (await resp.json()) as { room: string | null };
+		if (!data.room) return false;
+		if (!(await joinRoom(data.room))) return false;
+		await new Promise<void>((resolve) => {
+			resolveRoomJoin = resolve;
+			// safety net: never leave ENTER GAME hung if "welcome" never arrives
+			setTimeout(() => {
+				if (resolveRoomJoin === resolve) {
+					resolveRoomJoin = null;
+					resolve();
+				}
+			}, 8000);
+		});
+		// let the initial handshake settle before the caller spawns us in — the
+		// server sends yourRoom/welcome/cosmetics/unlocks in a burst and respawning
+		// mid-burst can get overwritten (when a room is picked by hand this gap
+		// happens naturally between selecting the room and pressing ENTER)
+		await new Promise<void>((resolve) => setTimeout(resolve, 350));
+		return !!st.room;
+	} catch {
+		return false;
+	}
+}
 
 var newUsernameInput = document.getElementById("newUsernameInput")! as HTMLInputElement;
 var youtubeChannelInput = document.getElementById("youtubeChannelInput")! as HTMLInputElement;
@@ -577,6 +630,13 @@ function setupSocket(sock: Socket) {
 			document.getElementById("startMenuWrapper")!.style.display = "none";
 		}
 		resize();
+		// unblock an autojoin-at-ENTER that's waiting for this handshake, so
+		// startGame can continue straight into the game (see autoJoinRoom)
+		if (resolveRoomJoin) {
+			const resolve = resolveRoomJoin;
+			resolveRoomJoin = null;
+			resolve();
+		}
 	});
 	sock.on("cSrvRes", (a, d) => {
 		if (d) {
@@ -584,45 +644,6 @@ function setupSocket(sock: Socket) {
 		} else {
 			st.messages.serverCreate = a;
 		}
-	});
-	sock.on("regRes", (a, _d) => {
-		st.messages.login = a;
-	});
-	sock.on("logRes", (a, d) => {
-		if (d) {
-			st.messages.login = "";
-			st.playerName = a.text;
-			localStorage.setItem("logKey", a.logKey);
-			localStorage.setItem("userName", a.text);
-			st.loggedIn = true;
-			st.player.loggedIn = true;
-			const user = findUserByIndex(st.player.index);
-			if (user) {
-				user.loggedIn = true;
-			}
-		} else {
-			st.messages.login = a;
-		}
-	});
-	sock.on("recovRes", (b, d) => {
-		st.messages.login = b;
-		if (!d) return;
-		document.getElementById("recoverForm")!.style.display = "block";
-		const chngPassKey = document.getElementById("chngPassKey")! as HTMLInputElement;
-		const chngPassPass = document.getElementById("chngPassPass")! as HTMLInputElement;
-		document.getElementById("chngPassButton")!.onclick = () => {
-			st.messages.login = "Please Wait...";
-			sock.emit("dbCngPass", {
-				passKey: chngPassKey.value,
-				newPass: chngPassPass.value,
-			});
-			sock.on("cngPassRes", (a, b) => {
-				st.messages.login = a;
-				if (b) {
-					document.getElementById("recoverForm")!.style.display = "none";
-				}
-			});
-		};
 	});
 	sock.on("dbClanCreateR", (a, d) => {
 		if (d) {
@@ -719,7 +740,13 @@ function setupSocket(sock: Socket) {
 	sock.on(
 		"gameSetup",
 		(setupJson: string, shouldSetupGameMap: boolean, shouldStartGame: boolean) => {
-			const setupData = JSON.parse(setupJson);
+			let setupData: any;
+			try {
+				setupData = JSON.parse(setupJson);
+			} catch {
+				console.error("gameSetup: malformed setup payload");
+				return;
+			}
 
 			if (shouldSetupGameMap) {
 				st.gameMap = setupData.mapData;
@@ -794,7 +821,7 @@ function setupSocket(sock: Socket) {
 	sock.on("rankUp", (rank: number) => {
 		st.rewardPopup = { kind: "rankUp", rank };
 	});
-	sock.on("crateResult", (data: { error?: string; won?: { itemName: string; chance: number } | null; remaining?: number }) => {
+	sock.on("crateResult", (data: { error?: string; won?: CrateWonItem | null; remaining?: number }) => {
 		if (data.error) return;
 		st.unopenedCrateCount = data.remaining ?? st.unopenedCrateCount;
 		st.rewardPopup = { kind: "crateOpen", won: data.won ?? null };
@@ -1131,7 +1158,12 @@ function hideStatTable() {
 }
 
 function addUser(userString: string) {
-	let parsed = JSON.parse(userString);
+	let parsed;
+	try {
+		parsed = JSON.parse(userString);
+	} catch {
+		return;
+	}
 	if (parsed.index !== st.player.index) {
 		const existingUser = findUserByIndex(parsed.index);
 		if (existingUser == null) {
@@ -2379,13 +2411,23 @@ async function loadModPack(url: string, isBaseAssets: boolean) {
 					let parsed = JSON.parse(data);
 					updateMenuInfo(parsed.name);
 				} else if (entry.filename.includes("charinfo")) {
-					let split = data.replace(/(\r\n|\n|\r)/gm, "").split("|");
-					let tmp = split.map((s) => JSON.parse(s));
-					st.characterClasses = tmp;
-					// hacky and may not work
-					st.loadout.class = st.characterClasses.find(
-						(c) => c.folderName === st.loadout.class.folderName,
-					)!;
+					// split on "|"; filter empties so a trailing separator can't feed
+					// JSON.parse("") and abort the whole mod load
+					const split = data.replace(/(\r\n|\n|\r)/gm, "").split("|");
+					const modClasses = split.filter((s) => s.trim()).map((s) => JSON.parse(s));
+					// mods often ship partial class defs (just names/sprite folders);
+					// merge onto the base class of the same folderName so omitted
+					// geometry (width/height/weaponIndexes) survives — otherwise the
+					// loadout preview draws with NaN coords and goes blank
+					st.characterClasses = modClasses.map((mc) => {
+						const base = baseCharacterClasses.find((b) => b.folderName === mc.folderName);
+						return base ? { ...base, ...mc } : mc;
+					});
+					// keep the current class if the mod still defines it, otherwise fall
+					// back to the first class — never leave st.loadout.class undefined
+					st.loadout.class =
+						st.characterClasses.find((c) => c.folderName === st.loadout.class?.folderName) ??
+						st.characterClasses[0];
 				}
 			} else if (basePath === "sprites") {
 				let data = await entry.getData(new zip.BlobWriter("image/png"));
@@ -2404,6 +2446,9 @@ async function loadModPack(url: string, isBaseAssets: boolean) {
 		loadDefaultSprites("sprites/");
 		loadSounds("sounds/");
 		loadingTexturePack = false;
+		// sprite sheets were just rebuilt — nudge reactive views (menu loadout
+		// preview) to redraw so a newly-picked mod actually shows in the menu
+		st.assetVersion++;
 	} catch (err) {
 		console.error(err);
 		loadingTexturePack = false;
@@ -2874,8 +2919,15 @@ window.renderLoadoutPreview = renderLoadoutPreview;
 function renderLoadoutPreview(canvas: HTMLCanvasElement) {
 	const ctx = canvas.getContext("2d")!;
 	ctx.imageSmoothingEnabled = false;
+	// reset transform/alpha so a prior render that threw mid-draw (e.g. a mod
+	// sprite still loading) can't leave the context in a broken state
+	ctx.setTransform(1, 0, 0, 1, 0, 0);
+	ctx.globalAlpha = 1;
 	ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+	// class can briefly be undefined while a mod swaps the class list — bail
+	// rather than throw (a later assetVersion re-render will draw it)
+	if (!st.loadout.class) return;
 	const classIndex = st.characterClasses.findIndex(
 		(c) => c.folderName === st.loadout.class.folderName,
 	);
@@ -2893,6 +2945,7 @@ function renderLoadoutPreview(canvas: HTMLCanvasElement) {
 	} as unknown as Player;
 
 	ctx.save();
+	try {
 	// feet baseline placed so the hat (above) and the weapon (below) both fit;
 	// drawing is in world units sized for a 200px-wide canvas, so scale up
 	// proportionally when the preview canvas is larger
@@ -3009,6 +3062,10 @@ function renderLoadoutPreview(canvas: HTMLCanvasElement) {
 		}
 	}
 	ctx.restore();
+	} catch {
+		// a mod sprite may still be loading with invalid dimensions; skip this
+		// frame — the staggered re-renders / assetVersion bump redraw once ready
+	}
 }
 
 function drawFlag(flg: FlagObject) {
@@ -3499,7 +3556,14 @@ function getCachedShadow(
 	height: number,
 	scaleY: number,
 ) {
-	if (cachedShadows[sprite.index!] === undefined && width !== 0 && sprite?.isLoaded) {
+	if (
+		cachedShadows[sprite.index!] === undefined &&
+		width > 0 &&
+		height > 0 &&
+		Number.isFinite(width) &&
+		Number.isFinite(height) &&
+		sprite?.isLoaded
+	) {
 		let tmpCanvas = document.createElement("canvas");
 		let ctx = tmpCanvas.getContext("2d")!;
 		ctx.imageSmoothingEnabled = false;

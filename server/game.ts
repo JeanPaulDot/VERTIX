@@ -99,7 +99,7 @@ export class Game {
 			firstReceive: true,
 			isBoss: false,
 			spray: {
-				src: "/assets/sprays/1.png",
+				src: "/images/sprays/1.png",
 				...sprays[0],
 			},
 			isInHardpoint: false,

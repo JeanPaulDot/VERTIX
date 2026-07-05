@@ -7,7 +7,7 @@
 	// loadout editing happens inline in this card (no modal)
 	let editing = $state(false);
 
-	type Row = { label: string; value: string; color?: string };
+	type Row = { label: string; value: string | undefined; color?: string };
 	const rows: Row[] = $derived([
 		{ label: "Class:", value: st.loadout.class.classN },
 		{

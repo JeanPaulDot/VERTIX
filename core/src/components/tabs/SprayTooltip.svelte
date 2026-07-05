@@ -9,7 +9,7 @@
 </script>
 
 <div class="hoverTooltip">
-	<img class="sprayDisplayImage" src={`../assets/sprays/${props.spray.id}.png`}>
+	<img class="sprayDisplayImage" src={`/images/sprays/${props.spray.id}.png`}>
 </div>
 <style>
 	.hoverTooltip {

@@ -2,65 +2,11 @@
 	import { st } from "../state.svelte.ts";
 	import StatusMessage from "./common/StatusMessage.svelte";
 
-	let username = $state("");
-	let email = $state("");
-	let password = $state("");
-
 	let clanCreateName = $state("");
 	let clanJoinName = $state("");
 	let clanInviteUsername = $state("");
 	let clanChatUrl = $state("");
 
-	function startLogin() {
-		st.messages.login = "Please Wait...";
-		fetch("/api/auth/login", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ userName: username, userPass: password }),
-		})
-			.then((r) => r.json())
-			.then((data) => {
-				if (data.error) {
-					st.messages.login = data.error;
-				} else {
-					st.messages.login = "Logged in!";
-					if (data.newlyUnlocked?.length > 0) {
-						st.rewardPopup = { kind: "unlocks", items: data.newlyUnlocked };
-					}
-					window.refreshLogin();
-				}
-			})
-			.catch(() => {
-				st.messages.login = "Connection failed";
-			});
-	}
-	function startRegister() {
-		st.messages.login = "Registering...";
-		fetch("/api/auth/register", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ userName: username, userEmail: email, userPass: password }),
-		})
-			.then((r) => r.json())
-			.then((data) => {
-				if (data.error) {
-					st.messages.login = data.error;
-				} else {
-					st.messages.login = "Registered!";
-					window.refreshLogin();
-				}
-			})
-			.catch(() => {
-				st.messages.login = "Connection failed";
-			});
-	}
-	function startRecover() {
-		if (!st.socket) return;
-		st.socket.emit("dbRecov", {
-			userMail: email,
-		});
-		st.messages.login = "Please Wait...";
-	}
 	function discordLogin() {
 		// popup keeps the game running; the callback page notifies us and closes itself
 		const popup = window.open(
@@ -71,7 +17,40 @@
 		if (!popup) {
 			// popup blocked — fall back to the full-page redirect flow
 			window.location.href = "/api/auth/discord";
+			return;
 		}
+		// The postMessage from the callback often can't reach us: discord.com sends
+		// COOP: same-origin, which severs window.opener across the round-trip. So we
+		// also poll our own session endpoint — the callback sets the session cookie
+		// on this same domain regardless, so refreshLogin() will pick it up once the
+		// user finishes authorizing. (The message listener in app.tsx still handles
+		// the fast path when window.opener does survive.)
+		st.messages.login = "Waiting for Discord...";
+		let tries = 0;
+		const poll = setInterval(async () => {
+			tries += 1;
+			let loggedIn = false;
+			try {
+				loggedIn = await window.refreshLogin();
+			} catch {
+				/* keep polling */
+			}
+			let popupClosed = false;
+			try {
+				popupClosed = popup.closed;
+			} catch {
+				/* opener/popup reference may be neutered by COOP; ignore */
+			}
+			// stop once logged in, the popup closed, or after ~5 minutes
+			if (loggedIn || popupClosed || tries >= 150) {
+				clearInterval(poll);
+				if (loggedIn) {
+					st.messages.login = "Logged in!";
+				} else if (st.messages.login === "Waiting for Discord...") {
+					st.messages.login = "";
+				}
+			}
+		}, 2000);
 	}
 
 	function logout() {
@@ -118,7 +97,8 @@
 <div id="accountWidget">
 	<!-- NOT LOGGED IN -->
 	<div style:display={st.loggedIn ? "none" : null}>
-		<h3 class="menuHeaderTabbed">LOGIN &amp; REGISTER</h3>
+		<h3 class="menuHeaderTabbed">LOG IN</h3>
+		<p class="loginBlurb">Log in with Discord to save your stats, earn quest rewards and crates, and join clans.</p>
 		<button
 			type="button"
 			class="discordButton"
@@ -126,51 +106,7 @@
 		>
 			Login with Discord
 		</button>
-		<div class="divider"><span>or</span></div>
-		<input
-			type="text"
-			class="menuTextInput"
-			style="margin-bottom:10px;"
-			placeholder="Username"
-			id="usernameInput"
-			maxlength="15"
-			bind:value={username}
-		>
-		<input
-			type="text"
-			class="menuTextInput"
-			style="margin-bottom:10px;"
-			placeholder="Email (Registration Only)"
-			id="emailInput"
-			maxlength="40"
-			bind:value={email}
-		>
-		<input
-			type="password"
-			class="menuTextInput"
-			placeholder="Password"
-			id="passwordInput"
-			maxlength="15"
-			bind:value={password}
-		>
 		<div id="loginMessage"><StatusMessage text={st.messages.login} /></div>
-		<button type="button" id="registerButton" onclick={startRegister} class="smallMenuButton">REGISTER</button>
-		<button type="button" id="loginButton" onclick={startLogin} class="smallMenuButton">LOGIN</button>
-		<button type="button" id="recoverButton" onclick={startRecover} class="smallMenuButton">RECOVER</button>
-		<div id="recoverForm" style="display:none;">
-			<input class="menuTextInput" placeholder="Enter Key" id="chngPassKey" maxlength="4" style="width:100%;">
-			<input
-				class="menuTextInput"
-				type="password"
-				placeholder="Enter new Password"
-				id="chngPassPass"
-				maxlength="15"
-				style="width:72%;margin-top:10px;"
-			>
-			<button type="button" id="chngPassButton" class="smallMenuButton" style="margin-left:5px;margin-top:10px;">
-				Change
-			</button>
-		</div>
 	</div>
 	<!-- LOGGED IN -->
 	<div style:display={st.loggedIn ? null : "none"}>
@@ -367,18 +303,11 @@
 		border-radius: 50%;
 	}
 
-	#registerButton {
-		margin-top: 10px;
-	}
-
-	#loginButton {
-		margin-top: 10px;
-		margin-left: 5px;
-	}
-
-	#recoverButton {
-		margin-top: 10px;
-		margin-left: 5px;
+	.loginBlurb {
+		font-size: 12px;
+		color: rgba(0, 0, 0, 0.55);
+		margin: 0 0 12px;
+		line-height: 1.4;
 	}
 
 	.discordButton {
@@ -396,25 +325,5 @@
 
 	.discordButton:hover {
 		background-color: #4752c4;
-	}
-
-	.divider {
-		display: flex;
-		align-items: center;
-		text-align: center;
-		margin-bottom: 10px;
-		color: #888;
-		font-size: 12px;
-	}
-
-	.divider::before,
-	.divider::after {
-		content: "";
-		flex: 1;
-		border-bottom: 1px solid #555;
-	}
-
-	.divider span {
-		padding: 0 10px;
 	}
 </style>

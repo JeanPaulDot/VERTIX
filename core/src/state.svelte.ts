@@ -21,6 +21,14 @@ export type QuestStreak = {
 	rewardLabel: string;
 };
 
+// what a crate awards; mirrors the server's openCrateForUser return shape
+export type CrateWonItem = {
+	itemType: "hat" | "shirt" | "camo";
+	itemId: number;
+	itemName: string;
+	chance: number;
+};
+
 function getCosmeticPref<T extends { id: number }>(data: T[], key: string): T | null {
 	const value = localStorage.getItem(key);
 	console.debug(`loading ${value} from ${key}`);
@@ -41,6 +49,17 @@ function getSprayPref() {
 		return sprays.find((spray) => spray.id === sprayId) ?? null;
 	}
 	return null;
+}
+
+// parse a JSON object stored in localStorage, tolerating missing/corrupted values
+// (a bad value must not throw at module load and break the whole app)
+function parseStoredObject(key: string): object {
+	try {
+		const parsed = JSON.parse(localStorage.getItem(key) ?? "{}");
+		return parsed && typeof parsed === "object" ? parsed : {};
+	} catch {
+		return {};
+	}
 }
 
 export const st = $state({
@@ -67,9 +86,12 @@ export const st = $state({
 		spray: getSprayPref(),
 	},
 	cosmetics: {
-		hats: [] as Hat[],
-		shirts: [] as Shirt[],
-		camos: [] as Camo[][],
+		// seed from the local catalog so the loadout works before any room is
+		// joined; the server re-sends these (including mods) over updHt/updShrt/
+		// updCmo once the player actually connects to a room
+		hats: [...cosmetics.hats] as Hat[],
+		shirts: [...cosmetics.shirts] as Shirt[],
+		camos: [cosmetics.camos] as unknown as Camo[][],
 	},
 	// item ids the logged-in player owns; empty sets for guests (who keep
 	// today's free-selection behavior everywhere else in the app)
@@ -85,7 +107,7 @@ export const st = $state({
 		| { kind: "unlocks"; items: { name: string; chance: number }[] }
 		| { kind: "rankUp"; rank: number }
 		| { kind: "pendingCrates"; count: number }
-		| { kind: "crateOpen"; won: { itemName: string; chance: number } | null },
+		| { kind: "crateOpen"; won: CrateWonItem | null },
 	sprays,
 	characterClasses,
 	shake: {
@@ -106,6 +128,9 @@ export const st = $state({
 		}[],
 	},
 	doSounds: false,
+	// bumped whenever a mod/base asset pack finishes (re)loading its sprite sheets,
+	// so reactive views like the menu LoadoutPreview re-render with the new sprites
+	assetVersion: 0,
 	kicked: false,
 	startingGame: false,
 	changingLobby: false,
@@ -155,7 +180,7 @@ export const st = $state({
 			// before this setting was wired up; unchecking now hides it (e.g. FFA-only players)
 			selectChat: true,
 		},
-		JSON.parse(localStorage.getItem("settings") ?? "{}") as object,
+		parseStoredObject("settings"),
 	),
 	keysList: Object.assign(
 		{
@@ -171,7 +196,7 @@ export const st = $state({
 			incWeapKey: "KeyE",
 			decWeapKey: "KeyQ",
 		},
-		JSON.parse(localStorage.getItem("keysList") ?? "{}") as object,
+		parseStoredObject("keysList"),
 	),
 	chatLines: [] as {
 		text: string;

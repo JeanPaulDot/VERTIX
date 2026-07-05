@@ -45,7 +45,6 @@ import {
 	decrementLikes,
 	findUserClanMembership,
 	getUserStats,
-	getUserUnlocks,
 	hasUnlock,
 	grantCrate,
 } from "./db.ts";
@@ -55,6 +54,7 @@ import {
 	attachSocketSession,
 	buildAccountPayload,
 	emitAccountStats,
+	emitUnlocks,
 	setupAuthHandlers,
 	type AuthenticatedSocket,
 } from "./auth.ts";
@@ -242,14 +242,7 @@ export class Room {
 				camos.length,
 				this.game.weapons.map(() => this.cosmetics.camos),
 			);
-			if (authSocket.userId) {
-				const unlocks = getUserUnlocks(authSocket.userId);
-				socket.emit("updUnlocks", {
-					hat: unlocks.filter((u) => u.item_type === "hat").map((u) => u.item_id),
-					shirt: unlocks.filter((u) => u.item_type === "shirt").map((u) => u.item_id),
-					camo: unlocks.filter((u) => u.item_type === "camo").map((u) => u.item_id),
-				});
-			}
+			emitUnlocks(authSocket);
 
 			socket.on("cHat", (id) => {
 				// guests have no account to persist unlocks against, so they keep
@@ -279,7 +272,7 @@ export class Room {
 				const spray = sprays.find((s) => s.id === id);
 				if (spray) {
 					player.spray = {
-						src: `/assets/sprays/${id}.png`,
+						src: `/images/sprays/${id}.png`,
 						...spray,
 					};
 				}

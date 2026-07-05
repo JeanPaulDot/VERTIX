@@ -1,32 +1,35 @@
 import { Hono } from "hono";
-import bcrypt from "bcrypt";
 import { createSessionCookie, isProduction, validateSession } from "./session.ts";
 import { buildAccountPayload } from "./auth.ts";
-import { createRateLimiter } from "./security.ts";
 import {
 	findUserByDiscordId,
 	createDiscordUser,
 	findUserByUsername,
-	findUserByEmail,
-	createUser,
 	getUserStats,
 	createEmptyStats,
 } from "./db.ts";
 import { checkForNewUnlocks } from "./unlocks.ts";
 import { recordLogin } from "./quests.ts";
 
-// brute-force / enumeration protection, keyed by client IP
-const loginLimiter = createRateLimiter(10, 60000);
-const registerLimiter = createRateLimiter(5, 60000);
-
-function clientIp(c: { req: { header: (name: string) => string | undefined } }): string {
-	return c.req.header("x-forwarded-for") ?? c.req.header("x-real-ip") ?? "unknown";
-}
-
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID ?? "";
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET ?? "";
 const DISCORD_REDIRECT_URI =
 	process.env.DISCORD_REDIRECT_URI ?? "http://localhost:5173/api/auth/discord/callback";
+
+// Discord is the only login method now, so surface a misconfigured production
+// deployment loudly instead of silently failing every login attempt.
+if (isProduction()) {
+	if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET) {
+		console.warn(
+			"[oauth] DISCORD_CLIENT_ID/SECRET is empty in production — Discord login will not work.",
+		);
+	}
+	if (DISCORD_REDIRECT_URI.includes("localhost")) {
+		console.warn(
+			`[oauth] DISCORD_REDIRECT_URI still points at localhost in production (${DISCORD_REDIRECT_URI}).`,
+		);
+	}
+}
 
 const DISCORD_AUTH_URL = "https://discord.com/oauth2/authorize";
 const DISCORD_TOKEN_URL = "https://discord.com/api/oauth2/token";
@@ -104,15 +107,23 @@ export function createOAuthRoutes(): Hono {
 			return c.json({ error: "Discord OAuth not configured" }, 500);
 		}
 
-		const state = generateState();
+		const isPopupFlow = c.req.query("popup") === "1";
+		// carry the popup flag inside the state value: Discord echoes state back on
+		// the callback, so popup mode is detected even if the oauth_popup cookie is
+		// dropped on the round-trip (e.g. cross-site cookie restrictions). Without
+		// this the callback would fall back to a redirect and load the game inside
+		// the popup instead of closing it.
+		const state = isPopupFlow ? `${generateState()}.p` : generateState();
 		const url = new URL(DISCORD_AUTH_URL);
 		url.searchParams.set("client_id", DISCORD_CLIENT_ID);
 		url.searchParams.set("redirect_uri", DISCORD_REDIRECT_URI);
 		url.searchParams.set("response_type", "code");
 		url.searchParams.set("scope", "identify");
 		url.searchParams.set("state", state);
-		// returning users who already authorized skip the consent screen entirely
-		url.searchParams.set("prompt", "none");
+		// NB: do NOT set prompt=none here. With prompt=none Discord refuses to show
+		// the consent screen and instead returns an error for anyone who hasn't
+		// already authorized the app (i.e. every first-time login), which silently
+		// breaks the flow. The default prompt auto-approves returning users anyway.
 
 		const secure = isProduction() ? "; Secure" : "";
 		c.header(
@@ -121,7 +132,7 @@ export function createOAuthRoutes(): Hono {
 			{ append: true },
 		);
 		// popup mode: the callback answers with a self-closing page instead of a redirect
-		if (c.req.query("popup") === "1") {
+		if (isPopupFlow) {
 			c.header(
 				"Set-Cookie",
 				`oauth_popup=1; Path=/; HttpOnly; SameSite=Lax; Max-Age=600${secure}`,
@@ -147,7 +158,9 @@ export function createOAuthRoutes(): Hono {
 				return [k, v.join("=")];
 			}),
 		);
-		const isPopup = cookies.oauth_popup === "1";
+		// the state carries a ".p" suffix in popup mode (see /auth/discord); trust it
+		// as a fallback so a lost oauth_popup cookie never navigates the popup to the game
+		const isPopup = cookies.oauth_popup === "1" || (state?.endsWith(".p") ?? false);
 		// in popup mode, answer with a tiny page that notifies the game window and
 		// closes itself, so the game never navigates away or reloads
 		const finish = (err: string | null) => {
@@ -158,15 +171,25 @@ export function createOAuthRoutes(): Hono {
 				/</g,
 				"\\u003c",
 			);
+			// Notify the opener (fast path) and close. window.opener is frequently
+			// null here because discord.com sends COOP: same-origin, which severs the
+			// popup from its opener on the round-trip. That's fine: the session cookie
+			// is already set on this domain, and the opener polls /api/auth/me to pick
+			// it up. So we must NOT navigate the popup to the game as a fallback —
+			// that's what made the popup "reopen the game". We just close (or, if the
+			// browser blocks close, show a done message).
 			return c.html(
-				`<!DOCTYPE html><html><body><script>
-					if (window.opener) {
-						window.opener.postMessage(${message}, window.location.origin);
+				`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding-top:40px">
+					<script>
+						try {
+							if (window.opener && !window.opener.closed) {
+								window.opener.postMessage(${message}, "*");
+							}
+						} catch (e) {}
 						window.close();
-					} else {
-						window.location.replace(${JSON.stringify(err ? `/?error=${encodeURIComponent(err)}` : "/")});
-					}
-				</script>Logging in… you can close this window.</body></html>`,
+					</script>
+					${err ? "Discord login failed. You can close this window." : "Login complete — you can close this window."}
+				</body></html>`,
 			);
 		};
 
@@ -241,86 +264,6 @@ export function createOAuthRoutes(): Hono {
 		const cookie = `vertix_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
 		c.header("Set-Cookie", cookie);
 		return c.redirect("/");
-	});
-
-	app.post("/auth/login", async (c) => {
-		if (!loginLimiter(clientIp(c))) {
-			return c.json({ error: "Too many login attempts. Try again later." }, 429);
-		}
-		const data = await c.req.json().catch(() => ({}));
-		const { userName, userPass } = data ?? {};
-
-		if (!userName || !userPass) {
-			return c.json({ error: "Username and password required" }, 400);
-		}
-
-		const user = findUserByUsername(userName);
-		if (!user) {
-			return c.json({ error: "User not found" }, 401);
-		}
-
-		const match = await bcrypt.compare(userPass, user.password_hash);
-		if (!match) {
-			return c.json({ error: "Incorrect password" }, 401);
-		}
-
-		const stats = getUserStats(user.id);
-		if (!stats) {
-			createEmptyStats(user.id);
-		}
-		const newlyUnlocked = checkForNewUnlocks(user.id, stats?.score ?? 0);
-
-		const cookie = await createSessionCookie(user.id, user.username);
-		c.header("Set-Cookie", cookie);
-		recordLogin(user.id);
-		return c.json({ username: user.username, newlyUnlocked });
-	});
-
-	app.post("/auth/register", async (c) => {
-		if (!registerLimiter(clientIp(c))) {
-			return c.json({ error: "Too many attempts. Try again later." }, 429);
-		}
-		const data = await c.req.json().catch(() => ({}));
-		const { userName, userEmail, userPass } = data ?? {};
-
-		if (!userName || !userEmail || !userPass) {
-			return c.json({ error: "All fields required" }, 400);
-		}
-
-		const trimmedName = userName.trim();
-		if (trimmedName.length < 1 || trimmedName.length > 15) {
-			return c.json({ error: "Username must be 1-15 characters" }, 400);
-		}
-		if (!/^[a-zA-Z0-9_]+$/.test(trimmedName)) {
-			return c.json({ error: "Username can only contain letters, numbers, and underscores" }, 400);
-		}
-
-		const trimmedEmail = userEmail.trim();
-		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
-			return c.json({ error: "Invalid email format" }, 400);
-		}
-
-		if (userPass.length < 4 || userPass.length > 32) {
-			return c.json({ error: "Password must be 4-32 characters" }, 400);
-		}
-
-		if (findUserByUsername(trimmedName)) {
-			return c.json({ error: "Username already taken" }, 409);
-		}
-
-		if (findUserByEmail(trimmedEmail)) {
-			return c.json({ error: "Email already registered" }, 409);
-		}
-
-		const hash = await bcrypt.hash(userPass, 10);
-		const newUser = createUser(trimmedName, trimmedEmail, hash);
-		createEmptyStats(newUser.id);
-		checkForNewUnlocks(newUser.id, 0);
-
-		const cookie = await createSessionCookie(newUser.id, newUser.username);
-		c.header("Set-Cookie", cookie);
-		recordLogin(newUser.id);
-		return c.json({ username: newUser.username });
 	});
 
 	return app;

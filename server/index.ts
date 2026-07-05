@@ -29,6 +29,7 @@ import {
 	setupProfileHandler,
 	attachSocketSession,
 	emitAccountStats,
+	emitUnlocks,
 	type AuthenticatedSocket,
 } from "./auth.ts";
 import { createOAuthRoutes } from "./oauth.ts";
@@ -99,11 +100,15 @@ io.use(async (socket, next) => {
 	next();
 });
 
+// the root ("lobby") namespace: the menu connects here before joining a game
+// room so quests/account/unlocks work in the menu. Reuses the same auth handlers
+// as room namespaces; the client swaps to a room socket on join.
 io.on("connection", (socket: Socket) => {
 	setupAuthHandlers(socket as AuthenticatedSocket);
 	setupProfileHandler(socket);
-	// If session cookie validated, emit account data automatically
+	// If session cookie validated, emit account data + owned cosmetics automatically
 	emitAccountStats(socket as AuthenticatedSocket);
+	emitUnlocks(socket as AuthenticatedSocket);
 });
 
 const api = new Hono();
@@ -309,8 +314,9 @@ const modsDir = process.env.DATA_DIR
 app.all("/mods/*", (c) => {
 	const urlPath = decodeURIComponent(new URL(c.req.url).pathname);
 	const filePath = path.join(modsDir, urlPath.replace("/mods/", ""));
-	// keep resolved paths inside the mods directory
-	if (!path.resolve(filePath).startsWith(path.resolve(modsDir))) {
+	// keep resolved paths inside the mods directory (trailing sep prevents a
+	// sibling dir like `mods-evil` from satisfying the prefix check)
+	if (!path.resolve(filePath).startsWith(path.resolve(modsDir) + path.sep)) {
 		return c.json({ error: "Mod not found" }, 404);
 	}
 	if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
@@ -350,7 +356,10 @@ if (process.env.NODE_ENV === "production") {
 	app.get("/*", (c) => {
 		const urlPath = new URL(c.req.url).pathname;
 		let filePath = path.join(distDir, urlPath === "/" ? "index.html" : urlPath);
-		if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+		// containment check: never serve a file resolved outside distDir (defense in
+		// depth — URL parsing already collapses `..`, but this makes it explicit)
+		const inDist = path.resolve(filePath).startsWith(path.resolve(distDir) + path.sep);
+		if (inDist && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
 			const ext = path.extname(filePath);
 			c.header("Content-Type", MIME[ext] || "application/octet-stream");
 			return c.body(fs.readFileSync(filePath));

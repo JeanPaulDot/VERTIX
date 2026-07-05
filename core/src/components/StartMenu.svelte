@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { st } from "../state.svelte";
 
-	const canStartGame = $derived(st.room && !st.changingLobby);
+	// ENTER GAME is available even with no room picked: startGame autojoins the
+	// best available room in that case. only block while a join is in flight.
+	const canStartGame = $derived(!st.changingLobby);
 </script>
 <input
 	type="text"
@@ -16,8 +18,8 @@
 <button type="button" id="startButton" onclick={() => { if (canStartGame) window.startGame() }}>
 	{st.changingLobby ? "JOINING..." : "ENTER GAME"}
 </button>
-{#if !canStartGame && !st.changingLobby}
-	<div id="noRoomHint">Select or create a room from the Room Browser to play.</div>
+{#if !st.room && !st.changingLobby}
+	<div id="noRoomHint">Pick a room from the Room Browser, or press Enter Game to auto-join.</div>
 {/if}
 
 <div id="currentRoomRow">
