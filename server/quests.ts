@@ -31,8 +31,14 @@ function getWeeklyPeriodStart(now: Date): string {
 
 // --- Quest definitions ---
 
+// `family` groups quests that track the same underlying stat. Picking is limited
+// to one quest per family, so a day can't hand out "get 10 kills", "get 15 kills"
+// and "get 20 kills" — three objectives that one kill count satisfies at once.
+type QuestFamily = "kills" | "damage" | "wins" | "goals" | "heal" | "score";
+
 type QuestDef = {
 	key: string;
+	family: QuestFamily;
 	name: string;
 	rewardType: "score" | "crate";
 	rewardAmount: number;
@@ -40,24 +46,24 @@ type QuestDef = {
 };
 
 const DAILY_QUEST_POOL: QuestDef[] = [
-	{ key: "kills_10", name: "Get 10 kills", rewardType: "score", rewardAmount: 150, goal: 10 },
-	{ key: "kills_15", name: "Get 15 kills", rewardType: "score", rewardAmount: 200, goal: 15 },
-	{ key: "kills_20", name: "Get 20 kills", rewardType: "score", rewardAmount: 250, goal: 20 },
-	{ key: "damage_500", name: "Deal 500 damage", rewardType: "score", rewardAmount: 200, goal: 500 },
-	{ key: "damage_1000", name: "Deal 1,000 damage", rewardType: "score", rewardAmount: 300, goal: 1000 },
-	{ key: "damage_1500", name: "Deal 1,500 damage", rewardType: "score", rewardAmount: 400, goal: 1500 },
-	{ key: "win_1", name: "Win 1 round", rewardType: "crate", rewardAmount: 1, goal: 1 },
-	{ key: "win_2", name: "Win 2 rounds", rewardType: "crate", rewardAmount: 2, goal: 2 },
-	{ key: "win_3", name: "Win 3 rounds", rewardType: "crate", rewardAmount: 3, goal: 3 },
-	{ key: "goals_2", name: "Score 2 goals", rewardType: "crate", rewardAmount: 1, goal: 2 },
-	{ key: "heal_300", name: "Heal 300 HP", rewardType: "score", rewardAmount: 200, goal: 300 },
+	{ key: "kills_10", family: "kills", name: "Get 10 kills", rewardType: "score", rewardAmount: 150, goal: 10 },
+	{ key: "kills_15", family: "kills", name: "Get 15 kills", rewardType: "score", rewardAmount: 200, goal: 15 },
+	{ key: "kills_20", family: "kills", name: "Get 20 kills", rewardType: "score", rewardAmount: 250, goal: 20 },
+	{ key: "damage_500", family: "damage", name: "Deal 500 damage", rewardType: "score", rewardAmount: 200, goal: 500 },
+	{ key: "damage_1000", family: "damage", name: "Deal 1,000 damage", rewardType: "score", rewardAmount: 300, goal: 1000 },
+	{ key: "damage_1500", family: "damage", name: "Deal 1,500 damage", rewardType: "score", rewardAmount: 400, goal: 1500 },
+	{ key: "win_1", family: "wins", name: "Win 1 round", rewardType: "crate", rewardAmount: 1, goal: 1 },
+	{ key: "win_2", family: "wins", name: "Win 2 rounds", rewardType: "crate", rewardAmount: 2, goal: 2 },
+	{ key: "win_3", family: "wins", name: "Win 3 rounds", rewardType: "crate", rewardAmount: 3, goal: 3 },
+	{ key: "goals_2", family: "goals", name: "Score 2 goals", rewardType: "crate", rewardAmount: 1, goal: 2 },
+	{ key: "heal_300", family: "heal", name: "Heal 300 HP", rewardType: "score", rewardAmount: 200, goal: 300 },
 ];
 
 const WEEKLY_QUEST_POOL: QuestDef[] = [
-	{ key: "score_10000", name: "Score 10,000 points", rewardType: "crate", rewardAmount: 2, goal: 10000 },
-	{ key: "kills_100", name: "Get 100 kills", rewardType: "crate", rewardAmount: 3, goal: 100 },
-	{ key: "wins_20", name: "Win 20 rounds", rewardType: "crate", rewardAmount: 2, goal: 20 },
-	{ key: "damage_15000", name: "Deal 15,000 damage", rewardType: "crate", rewardAmount: 3, goal: 15000 },
+	{ key: "score_10000", family: "score", name: "Score 10,000 points", rewardType: "crate", rewardAmount: 2, goal: 10000 },
+	{ key: "kills_100", family: "kills", name: "Get 100 kills", rewardType: "crate", rewardAmount: 3, goal: 100 },
+	{ key: "wins_20", family: "wins", name: "Win 20 rounds", rewardType: "crate", rewardAmount: 2, goal: 20 },
+	{ key: "damage_15000", family: "damage", name: "Deal 15,000 damage", rewardType: "crate", rewardAmount: 3, goal: 15000 },
 ];
 
 // Simple seeded random from date string so all players share the same daily pool
@@ -71,7 +77,21 @@ function seededRandom(seed: string): number {
 
 function pickQuests(pool: QuestDef[], seed: string, count: number): QuestDef[] {
 	const shuffled = [...pool].sort((a, b) => seededRandom(seed + a.key) - seededRandom(seed + b.key));
-	return shuffled.slice(0, count);
+	// one per family first (so the three picks track three different stats), then
+	// backfill from what's left if the pool has fewer families than `count`
+	const picked: QuestDef[] = [];
+	const usedFamilies = new Set<QuestFamily>();
+	for (const def of shuffled) {
+		if (picked.length >= count) break;
+		if (usedFamilies.has(def.family)) continue;
+		usedFamilies.add(def.family);
+		picked.push(def);
+	}
+	for (const def of shuffled) {
+		if (picked.length >= count) break;
+		if (!picked.includes(def)) picked.push(def);
+	}
+	return picked;
 }
 
 // --- Public API ---
@@ -219,7 +239,12 @@ export function recordLogin(userId: number): { streakDay: number; justCompletedS
 	}
 
 	if (streak.last_login_date === yesterday) {
-		newDay = Math.min(streak.streak_day + 1, 7);
+		// Day 7 is the end of the cycle, not a plateau. Clamping to 7 meant every
+		// further consecutive day re-ran the `newDay >= 7` branch below and granted
+		// another crate — a perpetual daily faucet — while the +50 SCORE days never
+		// came back. Roll over to day 1 instead, which is what the UI's 7-day track
+		// and the README both describe.
+		newDay = streak.streak_day >= 7 ? 1 : streak.streak_day + 1;
 	} else {
 		newDay = 1;
 	}
@@ -227,10 +252,10 @@ export function recordLogin(userId: number): { streakDay: number; justCompletedS
 	updateLoginStreak(userId, newDay, today);
 
 	if (newDay >= 7) {
-		// grant streak reward
+		// completing the week grants the crate; the next login starts a fresh track
 		grantCrate(userId, "login_streak");
 		justCompleted = true;
-	} else if (newDay >= 1) {
+	} else {
 		incrementBonusScore(userId, 50);
 	}
 
@@ -277,10 +302,11 @@ export function incrementQuestProgressFromStats(
 		increments.push({ key: "wins_20", amount: 1 }); // weekly
 	}
 
-	// Apply increments to both daily and weekly periods
+	// Apply increments to both daily and weekly periods. quest_type is passed so the
+	// two passes can't collide on Mondays, where dailyPeriod === weeklyPeriod.
 	for (const inc of increments) {
-		incrementQuestProgress(userId, inc.key, inc.amount, dailyPeriod);
-		incrementQuestProgress(userId, inc.key, inc.amount, weeklyPeriod);
+		incrementQuestProgress(userId, "daily", inc.key, inc.amount, dailyPeriod);
+		incrementQuestProgress(userId, "weekly", inc.key, inc.amount, weeklyPeriod);
 	}
 }
 

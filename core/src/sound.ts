@@ -1,4 +1,4 @@
-import { Howl } from "howler";
+import { Howl, Howler } from "howler";
 import { st } from "./state.svelte.ts";
 import { getDistance } from "./utils.ts";
 
@@ -132,6 +132,7 @@ export function loadSounds(base: string) {
 		}
 		loadSound(tmpSound, meta, tmpFormat);
 	}
+	applyVolumeSettings();
 }
 function loadSound(src: string, sound: (typeof soundMeta)[number], format: string) {
 	soundList[sound.id]?.sound?.stop();
@@ -146,6 +147,26 @@ function loadSound(src: string, sound: (typeof soundMeta)[number], format: strin
 		}),
 	};
 }
+/**
+ * Pushes the user's audio settings into howler. Called whenever Settings change
+ * and after a sound pack (re)loads, since loadSound builds fresh Howl instances.
+ * Guarded for the server, which imports this module via projectile.ts and has
+ * only a stub for howler.
+ */
+export function applyVolumeSettings() {
+	if (typeof window === "undefined") return;
+	try {
+		Howler.mute(st.settings.muted);
+		Howler.volume(st.settings.masterVolume);
+		// music runs on its own level; SFX are scaled per-play in playSound because
+		// their volume also encodes distance
+		soundList.track1?.sound.volume(st.settings.musicVolume);
+		soundList.track2?.sound.volume(st.settings.musicVolume);
+	} catch (e) {
+		console.log(e);
+	}
+}
+
 var currentTrack = 0;
 export function startSoundTrack(id: number) {
 	if (!st.doSounds || !soundList.track1 || !soundList.track2) {
@@ -156,14 +177,14 @@ export function startSoundTrack(id: number) {
 			if (currentTrack !== id) {
 				currentTrack = id;
 				soundList.track1.sound.play();
-				soundList.track1.sound.fade(0, 1, 1000);
+				soundList.track1.sound.fade(0, st.settings.musicVolume, 1000);
 			}
 			soundList.track2.sound.stop();
 		} else {
 			if (currentTrack !== id) {
 				currentTrack = id;
 				soundList.track2.sound.play();
-				soundList.track2.sound.fade(0, 1, 1000);
+				soundList.track2.sound.fade(0, st.settings.musicVolume, 1000);
 			}
 			soundList.track1.sound.stop();
 		}
@@ -180,7 +201,8 @@ export function playSound(soundId: string, x: number, y: number) {
 				const soundEntry = soundList[soundId];
 				if (soundEntry !== undefined) {
 					const { sound } = soundEntry;
-					sound.volume(Math.round((1 - dist / maxHearDist) * 10) / 10);
+					const falloff = Math.round((1 - dist / maxHearDist) * 10) / 10;
+					sound.volume(falloff * st.settings.sfxVolume);
 					sound.play();
 				}
 			}

@@ -1,10 +1,14 @@
-import { characterClasses } from "core/src/loadouts.ts";
+import { PLAYER_SELECTABLE_CLASS_COUNT } from "core/src/loadouts.ts";
 import { camos, hats, shirts } from "core/src/skins.ts";
 
 const HTML_TAG_RE = /<[^>]*>/g;
 const MAX_NAME_LENGTH = 25;
 const MAX_CHAT_LENGTH = 50;
 const MAX_MOVEMENT_DELTA = 100;
+// A floor as well as a ceiling: Room.updateBullet schedules each bullet's next
+// physics step with setTimeout(tick, player.delta), so a client reporting delta:0
+// spun every one of its bullets at ~1000Hz until the projectile's lifetime ran out.
+const MIN_MOVEMENT_DELTA = 8;
 const MAX_SHOOT_DISTANCE = 500;
 
 export function sanitizeName(name: unknown): string {
@@ -14,8 +18,16 @@ export function sanitizeName(name: unknown): string {
 	return cleaned.substring(0, MAX_NAME_LENGTH);
 }
 
+// deliberately NOT characterClasses.length: the trailing boss classes are
+// mode-assigned by applyClassLoadout, and accepting them here let a modified
+// client spawn with 2000 HP and the boss loadout in any mode
 export function isValidClassIndex(index: unknown): boolean {
-	return typeof index === "number" && Number.isInteger(index) && index >= 0 && index < characterClasses.length;
+	return (
+		typeof index === "number" &&
+		Number.isInteger(index) &&
+		index >= 0 &&
+		index < PLAYER_SELECTABLE_CLASS_COUNT
+	);
 }
 
 export function clampNumber(value: unknown, min: number, max: number): number {
@@ -111,7 +123,7 @@ export function clampMovementInput(data: {
 	return {
 		hdt: clampMovementDelta(data.hdt),
 		vdt: clampMovementDelta(data.vdt),
-		delta: clampNumber(data.delta, 0, MAX_MOVEMENT_DELTA),
+		delta: clampNumber(data.delta, MIN_MOVEMENT_DELTA, MAX_MOVEMENT_DELTA),
 		s: data.s === 1 ? 1 : 0,
 		isn: clampNumber(data.isn, 0, 2_147_483_647),
 	};
@@ -180,4 +192,52 @@ export function createConnectionLimiter(maxPerIp: number) {
 			else counts.set(ip, current - 1);
 		},
 	};
+}
+
+// --- client IP resolution -------------------------------------------------
+//
+// Behind a reverse proxy every connection arrives from the proxy itself, so the
+// raw socket address is useless as a rate-limit key: socket.io reported
+// 127.0.0.1 for every player, which turned createConnectionLimiter(5) into a
+// global 5-connection cap on the whole server.
+//
+// X-Forwarded-For is *appended* to by nginx ($proxy_add_x_forwarded_for), so the
+// header reads "<whatever the client sent>, <real client ip>". Only the entries
+// our own proxies added can be trusted, and they are on the RIGHT. With one
+// trusted hop the real client is the last entry — never the first, which is
+// entirely attacker-chosen.
+//
+// TRUST_PROXY is the number of proxies in front of us (nginx / NPM = 1). It
+// defaults to 0 so a direct-to-node deployment keeps using the socket address.
+const TRUST_PROXY_HOPS = Math.max(0, Math.floor(Number(process.env.TRUST_PROXY ?? 0) || 0));
+
+export function trustsProxy(): boolean {
+	return TRUST_PROXY_HOPS > 0;
+}
+
+/**
+ * Resolves the client IP for rate-limiting purposes.
+ *
+ * @param forwardedFor the raw X-Forwarded-For header, if any
+ * @param socketAddress the peer address of the underlying connection
+ */
+export function getClientIp(
+	forwardedFor: string | undefined,
+	socketAddress: string | undefined,
+): string {
+	if (TRUST_PROXY_HOPS > 0 && forwardedFor) {
+		const hops = forwardedFor
+			.split(",")
+			.map((h) => h.trim())
+			.filter((h) => h.length > 0);
+		// step back past the hops our own proxies appended; anything further left
+		// was supplied by the client and must not be trusted
+		const index = hops.length - TRUST_PROXY_HOPS;
+		const candidate = hops[index];
+		if (candidate) return candidate;
+		// fewer entries than configured hops — the request didn't come through the
+		// expected chain, so fall through to the socket address rather than
+		// trusting a client-supplied value
+	}
+	return socketAddress ?? "unknown";
 }

@@ -1,14 +1,16 @@
 import type { Projectile } from "./logic/projectile.ts";
 import { st } from "./state.svelte.ts";
-import type { ClutterObject, FlagObject, GenData, Player, ShootEvent, Tile } from "./types.ts";
+import type { ClutterObject, FlagObject, GenData, Player, ShootEvent, Tile, TileGrid } from "./types.ts";
 
-var bulletIndex = 0;
+// One rotation cursor per pool, not one global cursor: the server imports this
+// module once for the whole process, so every room was sharing a single index
+// into its own 100-slot pool and stepping on the others' rotation.
+const bulletCursors = new WeakMap<Projectile[], number>();
 export function getNextBullet(bullets: Projectile[]) {
-	bulletIndex++;
-	if (bulletIndex >= bullets.length) {
-		bulletIndex = 0;
-	}
-	return bullets[bulletIndex];
+	if (bullets.length === 0) return bullets[0];
+	const next = ((bulletCursors.get(bullets) ?? 0) + 1) % bullets.length;
+	bulletCursors.set(bullets, next);
+	return bullets[next];
 }
 export function shootNextBullet(
 	init: Omit<ShootEvent, "i"> & { i?: number },
@@ -253,7 +255,58 @@ export function setupMap(gameMap: any, mapTileScale: number, flags: FlagObject[]
 			}
 		}
 	}
+	gameMap.tileGrid = buildTileGrid(gameMap);
 }
+
+/**
+ * Builds the column-major index over a finished tile array. Mirrors the layout
+ * setupMap produces: index = col * rows + row, x = originX + col * scale.
+ */
+export function buildTileGrid(gameMap: {
+	tiles: Tile[];
+	genData: GenData;
+}): TileGrid | undefined {
+	const { tiles, genData } = gameMap;
+	if (tiles.length === 0) return undefined;
+	return {
+		cols: genData.width,
+		rows: genData.height,
+		scale: tiles[0].scale,
+		originX: tiles[0].x,
+		originY: tiles[0].y,
+	};
+}
+
+/**
+ * Fills `out` with the colliding wall tiles within `radius` cells of (x, y) and
+ * returns it. Callers pass their own reusable buffer, so this allocates nothing
+ * per call. Returns `null` when there is no grid, so callers can fall back to a
+ * full scan rather than silently colliding with nothing.
+ */
+export function collectCollisionTilesAround(
+	map: { tiles: Tile[]; tileGrid?: TileGrid },
+	x: number,
+	y: number,
+	out: Tile[],
+	radius = 1,
+): Tile[] | null {
+	const grid = map.tileGrid;
+	if (!grid) return null;
+	out.length = 0;
+	const col = Math.floor((x - grid.originX) / grid.scale);
+	const row = Math.floor((y - grid.originY) / grid.scale);
+	for (let c = col - radius; c <= col + radius; c++) {
+		if (c < 0 || c >= grid.cols) continue;
+		const colBase = c * grid.rows;
+		for (let r = row - radius; r <= row + radius; r++) {
+			if (r < 0 || r >= grid.rows) continue;
+			const tile = map.tiles[colBase + r];
+			if (tile?.wall && tile.hasCollision) out.push(tile);
+		}
+	}
+	return out;
+}
+
 function canPlaceFlag(tile: Tile | undefined, ignoreWalls: boolean) {
 	if (ignoreWalls) {
 		return tile && !tile.wall && !tile.hardPoint;
@@ -281,13 +334,32 @@ function touchesClutter(x: number, y: number, width: number, clt: ClutterObject)
 	);
 }
 
-export function wallCol(player: Player, tiles: Tile[], clutter: ClutterObject[]) {
+// reusable buffers for the tile-neighbourhood lookups below. wallCol is called
+// per movement packet for every player in every room (plus once per frame and
+// once per replayed input on the client), so it must not allocate.
+const wallColTiles: Tile[] = [];
+
+/**
+ * Resolves the player out of walls and clutter, and computes the name offset
+ * used when their head is behind a wall.
+ *
+ * `map` carries the tile grid built by setupMap; only the tiles in the cells
+ * around the player can possibly touch them (a player is 50x94 in a 256px cell),
+ * so this looks at ~9 tiles instead of filtering all ~576 of them three times.
+ * Falls back to the full tile list if the map predates the grid.
+ */
+export function wallCol(
+	player: Player,
+	map: { tiles: Tile[]; tileGrid?: TileGrid },
+	clutter: ClutterObject[],
+) {
 	if (player.dead) return;
 
-	const wallCollisionTiles = tiles.filter((tile) => tile.wall && tile.hasCollision);
-	const activeCollisionClutter = clutter.filter((clt) => clt.active && clt.hc);
+	const near = (x: number, y: number) =>
+		collectCollisionTilesAround(map, x, y, wallColTiles) ??
+		map.tiles.filter((tile) => tile.wall && tile.hasCollision);
 
-	for (const tile of wallCollisionTiles) {
+	for (const tile of near(player.x, player.oldY)) {
 		if (touchesTile(player.x, player.oldY, player.width, tile)) {
 			if (player.oldX + player.width / 2 <= tile.x) {
 				player.x = tile.x - player.width / 2 - 2;
@@ -296,7 +368,8 @@ export function wallCol(player: Player, tiles: Tile[], clutter: ClutterObject[])
 			}
 		}
 	}
-	for (const clt of activeCollisionClutter) {
+	for (const clt of clutter) {
+		if (!clt.active || !clt.hc) continue;
 		if (touchesClutter(player.x, player.oldY, player.width, clt)) {
 			if (player.oldX + player.width / 2 <= clt.x) {
 				player.x = clt.x - player.width / 2 - 1;
@@ -306,7 +379,7 @@ export function wallCol(player: Player, tiles: Tile[], clutter: ClutterObject[])
 		}
 	}
 
-	for (const tile of wallCollisionTiles) {
+	for (const tile of near(player.x, player.y)) {
 		if (touchesTile(player.x, player.y, player.width, tile)) {
 			if (player.oldY <= tile.y) {
 				player.y = tile.y - 2;
@@ -315,7 +388,8 @@ export function wallCol(player: Player, tiles: Tile[], clutter: ClutterObject[])
 			}
 		}
 	}
-	for (const clt of activeCollisionClutter) {
+	for (const clt of clutter) {
+		if (!clt.active || !clt.hc) continue;
 		if (touchesClutter(player.x, player.y, player.width, clt)) {
 			if (player.oldY >= clt.y + (clt.h / 2) * clt.tp) {
 				player.y = clt.y + (clt.h / 2) * clt.tp + 1;
@@ -328,7 +402,7 @@ export function wallCol(player: Player, tiles: Tile[], clutter: ClutterObject[])
 	player.nameYOffset = 0;
 	const playerHeadY = player.y - player.jumpY - player.height * 0.85;
 
-	for (const tile of wallCollisionTiles) {
+	for (const tile of near(player.x, playerHeadY)) {
 		if (
 			!tile.hardPoint &&
 			player.x > tile.x &&

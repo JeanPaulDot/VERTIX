@@ -1,7 +1,7 @@
 import { playSound } from "../sound.ts";
 import { st } from "../state.svelte.ts";
-import type { ClutterObject, Player, Tile } from "../types.ts";
-import { dotInRect, getDistance, randomInt } from "../utils.ts";
+import type { ClutterObject, Player, Tile, TileGrid } from "../types.ts";
+import { collectCollisionTilesAround, dotInRect, getDistance, randomInt } from "../utils.ts";
 import { createLiquid, particleCone, stillDustParticle } from "../visual/particle.ts";
 
 const EXPLOSIVE_CLUTTER_INDEX = 2;
@@ -56,7 +56,7 @@ export class Projectile {
 		delta: number,
 		currentTime: number,
 		clutter: ClutterObject[],
-		tiles: Tile[],
+		map: { tiles: Tile[]; tileGrid?: TileGrid },
 		players: Player[],
 	) {
 		if (this.active) {
@@ -95,7 +95,8 @@ export class Projectile {
 					this.cEndX = this.x + ((vel + this.height) * Math.cos(this.dir)) / this.updateAccuracy;
 					this.cEndY = this.y + ((vel + this.height) * Math.sin(this.dir)) / this.updateAccuracy;
 
-					for (const [i, clt] of clutter.entries()) {
+					for (let i = 0; i < clutter.length; i++) {
+						const clt = clutter[i];
 						if (
 							this.active &&
 							clt.active &&
@@ -112,7 +113,10 @@ export class Projectile {
 						}
 					}
 					if (this.active) {
-						for (const tl of tiles) {
+						// only tiles this sub-step's segment can reach may satisfy lineInRect,
+						// so scan the cells around the segment instead of every tile on the
+						// map - this ran ~576 iterations per sub-step, 3 sub-steps per tick
+						for (const tl of this.tilesNearSegment(map)) {
 							if (this.active) {
 								if (tl.wall && tl.hasCollision && this.canSeeObject(tl, tl.scale)) {
 									if (tl.bottom) {
@@ -199,7 +203,8 @@ export class Projectile {
 						this.active = false;
 					}
 					if (!this.active && this.explodeOnDeath && !this.collidesWithExplosiveClutter) {
-						for (const [i, clt] of clutter.entries()) {
+						for (let i = 0; i < clutter.length; i++) {
+							const clt = clutter[i];
 							if (
 								clt.active &&
 								clt.hc &&
@@ -228,11 +233,39 @@ export class Projectile {
 		}
 		this.skipMove = false;
 	}
+	/** reused so the per-sub-step tile lookup allocates nothing */
+	private nearbyTiles: Tile[] = [];
+
+	/**
+	 * Colliding wall tiles this sub-step's segment could intersect. The radius comes
+	 * from the segment's own reach (speed x delta, plus the bullet's length), so a
+	 * fast bullet on a long frame still sees every tile in its path. Falls back to
+	 * the full tile list when the map has no grid.
+	 */
+	private tilesNearSegment(map: { tiles: Tile[]; tileGrid?: TileGrid }): Tile[] {
+		const grid = map.tileGrid;
+		if (!grid) return map.tiles;
+		const reach = Math.abs(this.cEndX - this.x) + Math.abs(this.cEndY - this.y) + this.height;
+		return (
+			collectCollisionTilesAround(
+				map,
+				(this.x + this.cEndX) / 2,
+				(this.y + this.cEndY) / 2,
+				this.nearbyTiles,
+				1 + Math.ceil(reach / grid.scale),
+			) ?? map.tiles
+		);
+	}
+
 	activate() {
 		this.skipMove = true;
 		this.hitClutter.length = 0;
 		this.hitPlayers.length = 0;
 		this.playerImmunity = {};
+		// projectiles are a reused pool: this flag is set by handleClutterHit and
+		// must be cleared here, or the slot stays in Room.updateBullet's explosion
+		// branch forever and never applies hitPlayers damage again
+		this.collidesWithExplosiveClutter = false;
 		this.active = true;
 		if (typeof window !== "undefined") playSound(`shot${this.weaponIndex}`, this.x, this.y);
 	}

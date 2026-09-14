@@ -13,6 +13,7 @@
 	import RoomList from "./RoomList.svelte";
 	import Settings from "./Settings.svelte";
 	import StartMenu from "./StartMenu.svelte";
+	import TouchControls from "./TouchControls.svelte";
 	import ModTab from "./tabs/ModTab.svelte";
 	import RewardsTab from "./tabs/RewardsTab.svelte";
 
@@ -85,6 +86,8 @@
 	<!-- biome-ignore lint/a11y/noPositiveTabindex: removing this breaks focus? -->
 	<canvas id="cvs" tabindex="1" class="noRightClick" oncontextmenu={() => false}></canvas>
 </div>
+
+<TouchControls />
 
 <GameStatsTable />
 

@@ -7,6 +7,36 @@
 	let clanInviteUsername = $state("");
 	let clanChatUrl = $state("");
 
+	// Clan panel visibility used to be driven imperatively from app.tsx, which
+	// captured these elements at module load — before this modal had ever been
+	// rendered — so the lookups were null, the handler threw, and the whole
+	// section stayed display:none forever. It's derived state now.
+	const inClan = $derived(!!st.player.account?.clan);
+	const isClanOwner = $derived(!!st.player.account?.isClanOwner);
+
+	// Edit-profile fields seed from the account and stay editable afterwards. The
+	// SAVE button's onclick was assigned in the same dead code path, so it never
+	// did anything; dbEditUser is fully implemented server-side.
+	let profileUsername = $state("");
+	let profileChannel = $state("");
+	let seededFor = "";
+	$effect(() => {
+		const account = st.player.account;
+		if (account?.username && seededFor !== account.username) {
+			seededFor = account.username;
+			profileUsername = account.username;
+			profileChannel = account.channel ?? "";
+		}
+	});
+
+	function saveProfile() {
+		st.socket?.emit("dbEditUser", {
+			userName: profileUsername,
+			userChannel: profileChannel,
+		});
+		st.messages.editProfile = "Please Wait...";
+	}
+
 	function discordLogin() {
 		// popup keeps the game running; the callback page notifies us and closes itself
 		const popup = window.open(
@@ -127,8 +157,8 @@
 			<div><b>Kills: </b>{st.player.account?.kills ?? "..."}</div>
 			<div><b>Deaths: </b>{st.player.account?.deaths ?? "..."}</div>
 			<div><b>KD: </b>{st.player.account?.kd ?? "..."}</div>
-			<h3 id="clanHeader">CLANS</h3>
-			<div id="clanSignUp" style:display="none">
+			<h3 id="clanHeader">{inClan ? `[${st.player.account.clan}] CLAN:` : "CLANS"}</h3>
+			<div id="clanSignUp" style:display={inClan ? "none" : "block"}>
 				<input
 					bind:value={clanCreateName}
 					class="menuTextInput"
@@ -165,7 +195,7 @@
 				</button>
 				<StatusMessage text={st.messages.clanDB} />
 			</div>
-			<div id="clanStats" style:display="none">
+			<div id="clanStats" style:display={inClan ? "block" : "none"}>
 				<div id="clanStatFounder"><b>Founder: </b>{st.clanData.founder ?? "..."}</div>
 				<div id="clanStatRank"><b>Rank: </b>{st.clanData.rank ?? "..."}</div>
 				<div id="clanStatKD"><b>Avg KD: </b>{st.clanData.kd ?? "..."}</div>
@@ -180,7 +210,7 @@
 						<a target="_blank" href={chatURL} rel="noopener"> Clan Chat </a>
 					{/if}
 				</div>
-				<div id="clanAdminPanel" style="display:none;margin-top:10px;">
+				<div id="clanAdminPanel" style:display={isClanOwner ? "block" : "none"} style:margin-top="10px">
 					<input
 						bind:value={clanChatUrl}
 						class="menuTextInput"
@@ -231,6 +261,7 @@
 			<div id="editAccount">
 				<h3 class="menuHeaderTabbed" style="margin-top:8px;">EDIT PROFILE</h3>
 				<input
+					bind:value={profileUsername}
 					class="menuTextInput"
 					placeholder="Username"
 					id="newUsernameInput"
@@ -238,12 +269,13 @@
 					style="margin-bottom:10px;width:95%;"
 				>
 				<input
+					bind:value={profileChannel}
 					class="menuTextInput"
 					placeholder="Youtube Channel Name/ID"
 					id="youtubeChannelInput"
 					style="margin-bottom:10px;width:95%;"
 				>
-				<button type="button" id="saveAccountData" class="smallMenuButton">SAVE</button>
+				<button type="button" id="saveAccountData" class="smallMenuButton" onclick={saveProfile}>SAVE</button>
 				<StatusMessage text={st.messages.editProfile} />
 			</div>
 		</div>
@@ -261,9 +293,10 @@
 			id="leaveClanButton"
 			onclick={() => st.socket?.emit("dbClanLeave")}
 			class="smallMenuButton"
-			style="margin-top:10px; margin-left:5px; margin-bottom:0px; display:none;"
+			style="margin-top:10px; margin-left:5px; margin-bottom:0px;"
+			style:display={inClan ? "inline-block" : "none"}
 		>
-			LEAVE CLAN
+			{isClanOwner ? "DELETE CLAN" : "LEAVE CLAN"}
 		</button>
 		<button
 			type="button"

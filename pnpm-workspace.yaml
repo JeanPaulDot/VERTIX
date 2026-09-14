@@ -12,3 +12,9 @@ onlyBuiltDependencies:
 
 publicHoistPattern:
   - svelte
+
+# node-linker=hoisted (.npmrc) puts one copy of each resolved version on a shared
+# path. Two @types/node majors there declare the same globals twice, which makes
+# svelte-check report hundreds of errors from inside node_modules. Pin one.
+overrides:
+  "@types/node": ^26.4.1

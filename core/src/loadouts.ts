@@ -171,6 +171,20 @@ export const characterClasses = [
 	},
 ];
 
+/**
+ * How many leading entries of `characterClasses` a player may actually pick.
+ * Everything after them is mode-assigned only: the "???" Boss Hunt boss, and a
+ * trailing placeholder with no classN and zero health/size. The server's
+ * applyClassLoadout is the only thing allowed to assign those, so both the
+ * loadout UI and the server's class validation clamp to this count.
+ */
+export const PLAYER_SELECTABLE_CLASS_COUNT = (() => {
+	const firstReserved = characterClasses.findIndex(
+		(c) => !("classN" in c) || c.classN === "???",
+	);
+	return firstReserved === -1 ? characterClasses.length : firstReserved;
+})();
+
 export const weapons: Weapon[] = [
 	{
 		name: "smg",

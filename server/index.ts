@@ -6,10 +6,16 @@ import { bodyLimit } from "hono/body-limit";
 import { Server, type Socket } from "socket.io";
 import fs from "fs";
 import path from "path";
+import Stream from "node:stream";
 import { fileURLToPath } from "url";
 import { gameModes } from "core/src/gamemodes.ts";
 import { Room, rooms } from "./room.ts";
-import { createRateLimiter, createConnectionLimiter } from "./security.ts";
+import {
+	createRateLimiter,
+	createConnectionLimiter,
+	getClientIp,
+	trustsProxy,
+} from "./security.ts";
 import {
 	initDb,
 	getLeaderboard,
@@ -30,18 +36,33 @@ import {
 	attachSocketSession,
 	emitAccountStats,
 	emitUnlocks,
+	recordLoginForSocket,
 	type AuthenticatedSocket,
 } from "./auth.ts";
-import { createOAuthRoutes } from "./oauth.ts";
+import { createOAuthRoutes, logOAuthConfig } from "./oauth.ts";
+import { log, formatDuration } from "./log.ts";
+import { defaultGenData } from "./maps.ts";
+
+const bootStartedAt = Date.now();
+const isProd = process.env.NODE_ENV === "production";
+
+log.raw("");
+log.raw("  VERTIX ONLINE — game server");
+log.info("boot", `node ${process.version}, env=${isProd ? "production" : "development"}, log level=${log.level}`);
+log.info("boot", `maps: ${defaultGenData.length} loaded`);
 
 initDb();
+log.info("boot", `database ready (${process.env.DATA_DIR ? `${process.env.DATA_DIR}/vertix.db` : "server/vertix.db"})`);
 
 // one-off backfill: unlock whatever every existing account's current lifetime
 // score already qualifies for, so switching on enforcement doesn't suddenly
 // lock people out of cosmetics they were already using freely
+let backfilled = 0;
 for (const { user_id, score } of getAllUserScores()) {
 	checkForNewUnlocks(user_id, score);
+	backfilled++;
 }
+log.info("boot", `accounts: ${backfilled} known, unlocks backfilled`);
 
 const allowedOrigins = process.env.CORS_ORIGINS
 	? process.env.CORS_ORIGINS.split(",").map((origin) => origin.trim())
@@ -50,15 +71,47 @@ const allowedOrigins = process.env.CORS_ORIGINS
 if (process.env.NODE_ENV === "production" && allowedOrigins.includes("*")) {
 	throw new Error("CORS_ORIGINS must not contain '*' in production");
 }
+log.info("boot", `cors origins: ${allowedOrigins.join(", ")}`);
+logOAuthConfig();
 
 const createRoomLimiter = createRateLimiter(3, 60000);
 const profileLimiter = createRateLimiter(30, 60000);
-const connectionLimiter = createConnectionLimiter(5);
+const leaderboardLimiter = createRateLimiter(20, 60000);
+// Households, phone networks and schools share one address, so a low per-IP cap
+// locks out legitimate players sitting next to each other. The real protection
+// against a single abusive host is the global cap below.
+const connectionLimiter = createConnectionLimiter(20);
+const MAX_CONNECTIONS = 400;
+let openConnections = 0;
+// Each Room allocates a 16ms position interval, a 100ms bot interval, 100
+// projectiles and a tile map, and only closes 60s after emptying. Without a
+// ceiling, room creation is a memory/CPU exhaustion primitive.
+const MAX_ROOMS = 200;
+
+if (process.env.NODE_ENV === "production" && !trustsProxy()) {
+	log.warn(
+		"boot",
+		"TRUST_PROXY is not set — if this server sits behind a reverse proxy, every " +
+			"player will share one rate-limit key. See .env.example",
+	);
+}
 
 const io = new Server({
 	cors: {
 		origin: allowedOrigins,
 		methods: ["GET"],
+	},
+	// The `cors` option above only decorates the handshake response; browsers do
+	// not apply CORS to WebSocket upgrades and non-browser clients ignore it
+	// entirely. allowRequest is the only place the origin is actually enforced.
+	allowRequest: (req, callback) => {
+		const origin = req.headers.origin;
+		// No Origin header is the NORMAL case here: browsers omit it on same-origin
+		// requests, and in production the page and socket share an origin — so
+		// rejecting on absence blocks every real player. What this guard is for is
+		// the cross-site case, and a browser always sends Origin for those.
+		if (!origin) return callback(null, true);
+		callback(null, allowedOrigins.includes(origin));
 	},
 });
 
@@ -85,13 +138,33 @@ function createPermanentRoom(io: Server, code: string) {
 for (let i = 0; i < 9; i++) {
 	createPermanentRoom(io, `DEV${i}`);
 }
+log.info(
+	"boot",
+	`rooms: ${rooms.length} permanent — ${rooms.map((r) => `${r.name}(${r.game.mode.code})`).join(" ")}`,
+);
 
 io.use((socket, next) => {
-	const ip = socket.handshake.address ?? "unknown";
+	// socket.io reads the raw TCP peer, which behind a reverse proxy is the proxy
+	// itself for every player — see getClientIp.
+	const forwarded = socket.handshake.headers["x-forwarded-for"];
+	const ip = getClientIp(
+		Array.isArray(forwarded) ? forwarded.join(",") : forwarded,
+		socket.handshake.address,
+	);
+	if (openConnections >= MAX_CONNECTIONS) {
+		return next(new Error("Server full"));
+	}
 	if (!connectionLimiter.increment(ip)) {
 		return next(new Error("Too many connections"));
 	}
-	socket.on("disconnect", () => connectionLimiter.decrement(ip));
+	openConnections++;
+	let released = false;
+	socket.on("disconnect", () => {
+		if (released) return;
+		released = true;
+		openConnections--;
+		connectionLimiter.decrement(ip);
+	});
 	next();
 });
 
@@ -106,6 +179,8 @@ io.use(async (socket, next) => {
 io.on("connection", (socket: Socket) => {
 	setupAuthHandlers(socket as AuthenticatedSocket);
 	setupProfileHandler(socket);
+	// count today's login before emitting stats, so any streak score/crate is included
+	recordLoginForSocket(socket as AuthenticatedSocket);
 	// If session cookie validated, emit account data + owned cosmetics automatically
 	emitAccountStats(socket as AuthenticatedSocket);
 	emitUnlocks(socket as AuthenticatedSocket);
@@ -155,9 +230,12 @@ api.get("/autoJoin", (c) => {
 });
 
 api.post("/createRoom", async (c) => {
-	const clientIp = c.req.header("x-forwarded-for") ?? c.req.header("x-real-ip") ?? "unknown";
+	const clientIp = getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip"));
 	if (!createRoomLimiter(clientIp)) {
 		return c.json({ error: "Rate limit exceeded" }, 429);
+	}
+	if (rooms.length >= MAX_ROOMS) {
+		return c.json({ error: "Server is at room capacity, try again later" }, 503);
 	}
 	const data = await c.req.json().catch(() => ({}));
 	let code: string;
@@ -186,8 +264,26 @@ api.post("/createRoom", async (c) => {
 	});
 	rooms.push(room);
 	room.handleSocket();
+	log.info(
+		"room",
+		`${code} created (private, ${room.game.mode.code}, max ${room.game.maxPlayers}${mapAccepted ? "" : ", custom map rejected"})`,
+	);
 
 	return c.json({ room: code, hostSecret, mapRejected: !mapAccepted });
+});
+
+// Liveness/health for the reverse proxy and for `curl`ing from the host: answers
+// with enough to tell at a glance whether the game is actually serving.
+api.get("/health", (c) => {
+	const players = rooms.flatMap((r) => r.game.players);
+	return c.json({
+		ok: true,
+		uptime: formatDuration(Date.now() - bootStartedAt),
+		uptimeSeconds: Math.floor((Date.now() - bootStartedAt) / 1000),
+		rooms: rooms.length,
+		humans: players.filter((p) => !p.isBot).length,
+		bots: players.filter((p) => p.isBot).length,
+	});
 });
 
 api.get("/getRooms", (c) => {
@@ -204,6 +300,11 @@ api.get("/getRooms", (c) => {
 });
 
 api.get("/getLbs", (c) => {
+	// six full-table scans with no cache — cheap for us to serve, cheaper still
+	// for someone to loop, so it needs a limiter like every other scan route
+	if (!leaderboardLimiter(getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip")))) {
+		return c.json({ error: "Rate limit exceeded" }, 429);
+	}
 	const rank = getLeaderboard("score", 50);
 	const kdrThousand = getLeaderboard("kdr", 50, 1000);
 	const kdrAny = getLeaderboard("kdr", 50);
@@ -258,6 +359,9 @@ api.get("/friends", async (c) => {
 });
 
 api.get("/clans", (c) => {
+	if (!leaderboardLimiter(getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip")))) {
+		return c.json({ error: "Rate limit exceeded" }, 429);
+	}
 	// getClanLeaderboard already computes stats for every clan and only slices
 	// to `limit` at the end, so a large limit gives us the full directory
 	return c.json(getClanLeaderboard("rank", 500));
@@ -272,7 +376,7 @@ api.get("/clan/:name", (c) => {
 });
 
 api.get("/profile/:username", (c) => {
-	const clientIp = c.req.header("x-forwarded-for") ?? c.req.header("x-real-ip") ?? "unknown";
+	const clientIp = getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip"));
 	if (!profileLimiter(clientIp)) {
 		return c.json({ error: "Rate limit exceeded" }, 429);
 	}
@@ -286,6 +390,36 @@ api.get("/profile/:username", (c) => {
 
 // root app: API mounted under /api, static files (production) at /
 const app = new Hono();
+
+// Hono does not propagate a mounted sub-app's middleware upward, so registering
+// these on `api` alone left the game page itself — the document that holds the
+// session cookie — with no CSP, no X-Frame-Options and no nosniff. They belong
+// on the root app, before any route.
+app.use(
+	secureHeaders({
+		contentSecurityPolicy: {
+			defaultSrc: ["'self'"],
+			// the game canvas pipeline builds sprites from mod images, which may be
+			// loaded from arbitrary user-supplied URLs, and blobs/data URIs are used
+			// for generated textures
+			imgSrc: ["'self'", "data:", "blob:", "https:"],
+			mediaSrc: ["'self'", "data:", "blob:"],
+			styleSrc: ["'self'", "'unsafe-inline'"],
+			scriptSrc: ["'self'"],
+			connectSrc: ["'self'", "ws:", "wss:"],
+			workerSrc: ["'self'", "blob:"],
+			objectSrc: ["'none'"],
+			baseUri: ["'self'"],
+			formAction: ["'self'"],
+			frameAncestors: ["'none'"],
+		},
+		// the OAuth popup calls window.opener.postMessage, which same-origin
+		// isolation would sever
+		crossOriginOpenerPolicy: false,
+		strictTransportSecurity:
+			process.env.NODE_ENV === "production" ? "max-age=31536000; includeSubDomains" : false,
+	}),
+);
 app.route("/api", api);
 
 const MIME: Record<string, string> = {
@@ -328,19 +462,30 @@ app.all("/mods/*", (c) => {
 	const range = c.req.header("range");
 
 	if (range) {
+		// Everything here is attacker-controlled. Unclamped, `bytes=0-99999999999`
+		// became a Buffer.alloc of ~100GB, and `bytes=-100` an alloc of NaN — both
+		// unauthenticated, on a route that sits outside the /api body limit.
 		const parts = range.replace(/bytes=/, "").split("-");
-		const start = Number.parseInt(parts[0], 10);
-		const end = parts[1] ? Number.parseInt(parts[1], 10) : stat.size - 1;
-		const chunkSize = end - start + 1;
-		const buffer = Buffer.alloc(chunkSize);
-		const fd = fs.openSync(filePath, "r");
-		fs.readSync(fd, buffer, 0, chunkSize, start);
-		fs.closeSync(fd);
+		const rawStart = Number.parseInt(parts[0], 10);
+		const rawEnd = parts[1] ? Number.parseInt(parts[1], 10) : stat.size - 1;
+		const start = Number.isFinite(rawStart) ? rawStart : Number.NaN;
+		const end = Number.isFinite(rawEnd) ? Math.min(rawEnd, stat.size - 1) : stat.size - 1;
+		if (!Number.isFinite(start) || start < 0 || start > end || start >= stat.size) {
+			c.header("Content-Range", `bytes */${stat.size}`);
+			return c.body(null, 416);
+		}
 		c.header("Content-Range", `bytes ${start}-${end}/${stat.size}`);
-		c.header("Content-Length", chunkSize.toString());
+		c.header("Content-Length", (end - start + 1).toString());
 		c.header("Content-Type", contentType);
 		c.header("Accept-Ranges", "bytes");
-		return c.body(buffer, 206);
+		// stream rather than buffering: the range is now bounded by the file, but a
+		// large legitimate mod still shouldn't be held in memory per request
+		return c.body(
+			Stream.Readable.toWeb(
+				fs.createReadStream(filePath, { start, end }),
+			) as ReadableStream,
+			206,
+		);
 	}
 
 	c.header("Content-Length", stat.size.toString());
@@ -378,13 +523,52 @@ if (process.env.NODE_ENV === "production") {
 	// single-port deployment: socket.io shares the HTTP server so one
 	// reverse-proxy forward (e.g. nginx -> server:1118) covers page, API and ws
 	io.attach(server as import("node:http").Server);
+	log.info("boot", "listening on :1118 — page + /api + socket.io (single port)");
 } else {
 	// dev: vite proxies /socket.io to this port
 	io.listen(1119);
+	log.info("boot", "listening on :1118 (api) and :1119 (socket.io) — dev mode");
 }
 
-process.on("SIGINT", () => {
+log.info("boot", `ready in ${Date.now() - bootStartedAt}ms`);
+log.raw("");
+
+// Periodic heartbeat so `docker compose logs` shows the server is alive and what
+// is actually being played, without having to guess from kill spam.
+// Set STATUS_INTERVAL_MS=0 to turn it off.
+const STATUS_INTERVAL_MS = Number(process.env.STATUS_INTERVAL_MS ?? 60000);
+if (STATUS_INTERVAL_MS > 0) {
+	setInterval(() => {
+		const players = rooms.flatMap((r) => r.game.players);
+		const humans = players.filter((p) => !p.isBot).length;
+		const bots = players.length - humans;
+		const busy = rooms
+			.filter((r) => r.game.players.some((p) => !p.isBot))
+			.map((r) => `${r.name}:${r.game.mode.code} ${r.occupancy()} ${r.game.score.lb}%`);
+		const uptime = formatDuration(Date.now() - bootStartedAt);
+		log.info(
+			"status",
+			busy.length > 0
+				? `up ${uptime} | ${rooms.length} rooms | ${humans} player(s), ${bots} bots | ${busy.join(" · ")}`
+				: `up ${uptime} | ${rooms.length} rooms | idle, no players`,
+		);
+	}, STATUS_INTERVAL_MS).unref();
+}
+
+function shutdown(signal: string) {
+	log.info("boot", `${signal} received — shutting down after ${formatDuration(Date.now() - bootStartedAt)}`);
 	server.close();
 	io.close();
 	process.exit(0);
+}
+process.on("SIGINT", () => shutdown("SIGINT"));
+// docker stop sends SIGTERM; without this the container was killed after the
+// 10s grace period instead of closing cleanly
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+process.on("uncaughtException", (err) => {
+	log.error("fatal", `uncaught exception: ${err instanceof Error ? err.stack : String(err)}`);
+});
+process.on("unhandledRejection", (reason) => {
+	log.error("fatal", `unhandled rejection: ${reason instanceof Error ? reason.stack : String(reason)}`);
 });

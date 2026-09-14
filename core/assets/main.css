@@ -752,3 +752,57 @@ div {
 #clanRoster {
 	padding-left: 10px;
 }
+
+/* ---------------------------------------------------------------------------
+   Touch devices
+   The canvas must claim its own gestures, or the browser pans/zooms the page
+   under the virtual sticks instead of passing the events to the game.
+   --------------------------------------------------------------------------- */
+#cvs {
+	touch-action: none;
+}
+
+/* Phones: the menu's three cards no longer fit side by side, and the default
+   tap targets are below the ~44px comfortable minimum. */
+@media (max-width: 600px) {
+	#startMenuWrapper {
+		padding: 10px;
+	}
+	#menuCenter {
+		gap: 14px;
+	}
+	#mainTitleText {
+		font-size: clamp(30px, 11vw, 48px);
+	}
+	#menuCards {
+		flex-direction: column;
+		align-items: stretch;
+		gap: 10px;
+	}
+	.menuCard {
+		flex: 1 1 auto;
+		min-width: 0;
+		max-width: none;
+		width: 100%;
+		padding: 14px;
+	}
+	.menuModalContent {
+		/* modals go effectively full-bleed rather than a fixed 420px column */
+		width: min(420px, 92vw);
+		font-size: 15px;
+	}
+	.menuModalScroll {
+		max-height: 68vh;
+	}
+	.smallMenuButton,
+	.menuRowButton {
+		min-height: 40px;
+	}
+	/* in-game HUD gets out of the virtual sticks' way */
+	#chatbox {
+		bottom: 190px;
+	}
+	#status {
+		display: none;
+	}
+}

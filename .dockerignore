@@ -3,6 +3,8 @@ node_modules
 dist
 **/dist
 *.db
+*.db-shm
+*.db-wal
 data/
 .git
 .claude
@@ -10,3 +12,8 @@ data/
 *.md
 biome.jsonc
 **/biome.jsonc
+# Secrets must never enter the build context: the Dockerfile does not COPY them
+# today, but one careless `COPY . .` would bake them into an image layer.
+.env
+.env.*
+*.env

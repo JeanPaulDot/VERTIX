@@ -31,6 +31,14 @@
 		return true;
 	}
 
+	// clicking a row only selects it; joining is a separate, deliberate click.
+	// a single stray click in the list used to yank you straight out of your game.
+	let pickedRoom: string | null = $state(null);
+
+	function joinPicked() {
+		if (pickedRoom && !st.changingLobby) window.joinRoom(pickedRoom);
+	}
+
 	let joinCode = $state("");
 	let joinPassword = $state("");
 	let joinMessage = $state("");
@@ -62,7 +70,6 @@
 		srvSpeedMult: 1,
 		srvPass: "",
 		srvMap: null as (GenData & { name: string }) | null,
-		srvClnWr: false,
 		srvModes: [] as number[],
 	});
 
@@ -149,8 +156,10 @@
 			<div
 				class="roomSelectItem"
 				class:roomSelectItemSelected={st.room === room.n}
+				class:roomSelectItemPicked={pickedRoom === room.n}
 				class:roomSelectItemFull={full}
-				onclick={() => { if (!full) window.joinRoom(room.n) }}
+				onclick={() => { if (!full) pickedRoom = room.n }}
+				ondblclick={() => { if (!full) { pickedRoom = room.n; joinPicked(); } }}
 			>
 				<b>{`${room.m}_${room.n}`}</b>
 				<b>{full ? "FULL" : `${room.lb}% - ${room.pl}/${room.mxpl}`}</b>
@@ -159,6 +168,18 @@
 			<div id="noRoomsMessage">No rooms match the filters.</div>
 		{/each}
 	</svelte:boundary>
+</div>
+<div id="roomJoinBar">
+	<span class="pickedLabel">
+		{pickedRoom ? `Selected: ${pickedRoom}` : "Select a room above"}
+	</span>
+	<button
+		class="smallMenuButton"
+		disabled={!pickedRoom || st.changingLobby}
+		onclick={joinPicked}
+	>
+		{st.changingLobby ? "JOINING..." : "JOIN ROOM"}
+	</button>
 </div>
 <div id="quickJoin">
 	<h3 class="menuHeader">JOIN A ROOM</h3>
@@ -210,11 +231,6 @@
 				<br>
 			{/each}
 		</div>
-		<b>Clan War</b>
-		<br>
-		<input type="checkbox" bind:checked={createGameOpts.srvClnWr}>
-		Enable
-		<br>
 		<b>Room Size: (2-8 Players)</b>
 		<input
 			class="menuTextInput"
@@ -346,6 +362,28 @@
 	.roomSelectItemSelected {
 		background: rgba(0, 0, 0, 0.1);
 		font-size: 14px;
+	}
+	.roomSelectItemPicked {
+		background: rgba(118, 179, 227, 0.35);
+		outline: 1px solid var(--setting-active-blue, #76b3e3);
+	}
+	#roomJoinBar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		margin-top: 8px;
+	}
+	.pickedLabel {
+		font-size: 12px;
+		color: rgba(0, 0, 0, 0.6);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	#roomJoinBar button[disabled] {
+		opacity: 0.45;
+		cursor: default;
 	}
 	.roomSelectItemFull {
 		opacity: 0.5;

@@ -5,6 +5,7 @@ import { resetCooldownAnimations } from "./components/ActionBar.svelte";
 import App from "./components/App.svelte";
 import { weaponNames, weapons, characterClasses as baseCharacterClasses } from "./loadouts.ts";
 import { Projectile } from "./logic/projectile.ts";
+import { sampleSnapshots, pruneSnapshots } from "./logic/interpolation.ts";
 import { loadSounds, playSound, startSoundTrack, stopAllSounds } from "./sound.ts";
 import { st, type CrateWonItem } from "./state.svelte.ts";
 import type {
@@ -16,6 +17,7 @@ import type {
 	GameMode,
 	Hat,
 	InputSendData,
+	NetSnapshot,
 	Player,
 	Shirt,
 	ShootEvent,
@@ -66,20 +68,15 @@ flushSync();
 
 var socket: Socket = null!; // O_O
 var reason: string | undefined;
-var fillCounter = 0;
 var delta = 0;
-var currentTime = Date.now();
-var oldTime = Date.now();
+var currentTime = performance.now();
+var oldTime = performance.now();
+// A backgrounded tab, a GC pause or a slow asset load produces an enormous
+// frame delta, which fed straight into position integration as a teleport.
+const MAX_FRAME_DELTA_MS = 100;
 var inputNumber = 0;
 var thisInput: InputSendData[] = [];
 
-if (/Android|webOS|iPhone|iPad|iPod|BlackBerry/i.test(navigator.userAgent)) {
-	st.mobile = true;
-	hideMenuUI();
-	hideUI(true);
-	alert("tried to open google play");
-	// openGooglePlay(false);
-}
 var inMainMenu = true;
 
 const loadingWrapper = document.getElementById("loadingWrapper")!;
@@ -136,13 +133,6 @@ function enterGame() {
 		}
 	}
 }
-var clanStats = document.getElementById("clanStats")!;
-var clanSignUp = document.getElementById("clanSignUp")!;
-var clanHeader = document.getElementById("clanHeader")!;
-var clanAdminPanel = document.getElementById("clanAdminPanel")!;
-var leaveClanButton = document.getElementById("leaveClanButton")!;
-var clanChatLink = document.getElementById("clanChatLink")!;
-
 const oauthErrorMessages: Record<string, string> = {
 	oauth_failed: "Discord login failed. Please try again.",
 	invalid_state: "Discord login expired. Please try again.",
@@ -208,10 +198,6 @@ function openLobby() {
 }
 
 window.onload = async () => {
-	if (st.mobile) {
-		document.getElementById("loadText")!.textContent = "MOBILE VERSION COMING SOON";
-		return;
-	}
 	drawMenuBackground();
 	hideUI(true);
 	resize();
@@ -267,8 +253,6 @@ async function autoJoinRoom(): Promise<boolean> {
 	}
 }
 
-var newUsernameInput = document.getElementById("newUsernameInput")! as HTMLInputElement;
-var youtubeChannelInput = document.getElementById("youtubeChannelInput")! as HTMLInputElement;
 // shown at most once per page load, the first time we learn crates are
 // waiting — later room switches/reconnects push the same account payload
 // again and shouldn't re-open the popup every time
@@ -298,43 +282,15 @@ function applyAccount(account: Account) {
 	}
 	updateAccountPage(account);
 }
+// The account panel is Svelte (AccountWidget.svelte), which renders inside a
+// {#if}-gated modal. This function used to reach into it with getElementById at
+// module scope — before the modal had ever been opened, so every lookup returned
+// null and this threw on the first `updAccStat`. That silently killed the SAVE
+// button binding and left the CLANS section permanently display:none, making
+// clan create/join unreachable even though the server handlers all worked.
+// Everything is derived from `st` now; the component reacts on its own.
 function updateAccountPage(a: Account) {
 	st.player.account = a;
-	// legacy element: removed from AccountTab.svelte, may not exist
-	const profileButton = document.getElementById("profileButton");
-	if (profileButton) {
-		profileButton.onclick = () => {
-			if (st.player.account.username) {
-				showUserStatPage(st.player.account.username);
-			}
-		};
-	}
-	newUsernameInput.value = st.player.account.username ?? "";
-	youtubeChannelInput.value = st.player.account.channel ?? "";
-	document.getElementById("saveAccountData")!.onclick = () => {
-		socket.emit("dbEditUser", {
-			userName: newUsernameInput.value,
-			userChannel: youtubeChannelInput.value,
-		});
-		st.messages.editProfile = "Please Wait...";
-	};
-	clanAdminPanel.style.display = "none";
-	leaveClanButton.style.display = "none";
-	if (a.clan !== "") {
-		clanSignUp.style.display = "none";
-		clanStats.style.display = "block";
-		leaveClanButton.style.display = "inline-block";
-		leaveClanButton.textContent = "LEAVE CLAN";
-		clanHeader.textContent = `[${a.clan}] CLAN:`;
-		if (a.isClanOwner) {
-			clanAdminPanel.style.display = "block";
-			leaveClanButton.textContent = "DELETE CLAN";
-		}
-	} else {
-		clanSignUp.style.display = "block";
-		clanStats.style.display = "none";
-		clanHeader.textContent = "Clans";
-	}
 }
 function showUserStatPage(userName: string) {
 	window.open(`/profile.html?${userName}`, "_blank");
@@ -382,6 +338,67 @@ var targetChanged = true;
 function focusGame() {
 	mainCanvas.focus();
 }
+
+// --- touch input bridge -------------------------------------------------------
+// TouchControls.svelte is a pure overlay: it drives the same `keys` / `target`
+// state the mouse and keyboard do, so no gameplay code needs a mobile branch.
+const touchMove = { x: 0, y: 0, active: false };
+const touchInput = {
+	move(x: number, y: number) {
+		touchMove.x = x;
+		touchMove.y = y;
+		touchMove.active = x !== 0 || y !== 0;
+	},
+	stopMove() {
+		touchMove.x = 0;
+		touchMove.y = 0;
+		touchMove.active = false;
+	},
+	/** `f` matches the mouse convention: the angle from the cursor back to the player */
+	aim(f: number, distance: number) {
+		target.f = utils.roundNumber(f, 2);
+		target.d = utils.roundNumber(distance, 2);
+		target.dOffset = utils.roundNumber(target.d / 4, 1);
+		targetChanged = true;
+	},
+	setFiring(firing: boolean) {
+		keys.lm = firing;
+	},
+	jump() {
+		// held for a couple of frames so updateGameLoop's jump check sees it
+		keys.s = true;
+		window.setTimeout(() => {
+			keys.s = false;
+		}, 80);
+	},
+	reload() {
+		const me = findUserByIndex(st.player.index);
+		if (me) playerReload(me, true);
+	},
+	swapWeapon(direction: number) {
+		playerSwapWeapon(findUserByIndex(st.player.index), direction);
+	},
+	spray() {
+		sendSpray();
+	},
+	toggleScoreboard() {
+		if (showingScoreBoard) {
+			hideStatTable();
+		} else if (st.gameStart && !st.player.dead && !st.gameOver) {
+			showingScoreBoard = true;
+			showStatTable(null, null, true, true);
+		}
+	},
+	openMenu() {
+		if (st.gameStart) showESCMenu();
+	},
+};
+declare global {
+	interface Window {
+		touchInput: typeof touchInput;
+	}
+}
+window.touchInput = touchInput;
 function gameInput(event: MouseEvent) {
 	event.preventDefault();
 	event.stopPropagation();
@@ -568,15 +585,19 @@ function receivePing() {
 }
 var pingInterval: ReturnType<typeof setInterval> | null = null;
 function setupSocket(sock: Socket) {
-	// logging, ignoring packets that are spammy
-	sock.onAny((event, ...args) => {
-		if (["pong1", "rsd"].includes(event)) return;
-		console.info("%c <= ", "background:#FF6A19;color:#000", event, args);
-	});
-	sock.onAnyOutgoing((event, ...args) => {
-		if (["ping1", "0", "4"].includes(event)) return;
-		console.info("%c => ", "background:#7F7;color:#000", event, args);
-	});
+	// dev-only packet logging: this fires for every inbound and outbound event, so
+	// in a production build it was formatting a console line for each frame's
+	// upd/1/2 traffic on top of retaining the args
+	if (import.meta.env.DEV) {
+		sock.onAny((event, ...args) => {
+			if (["pong1", "rsd"].includes(event)) return;
+			console.info("%c <= ", "background:#FF6A19;color:#000", event, args);
+		});
+		sock.onAnyOutgoing((event, ...args) => {
+			if (["ping1", "0", "4"].includes(event)) return;
+			console.info("%c => ", "background:#7F7;color:#000", event, args);
+		});
+	}
 	sock.on("pong1", receivePing);
 	if (pingInterval != null) {
 		clearInterval(pingInterval);
@@ -585,8 +606,9 @@ function setupSocket(sock: Socket) {
 		pingStart = Date.now();
 		sock.emit("ping1");
 	}, 2000);
-	sock.on("yourRoom", (roomName) => {
+	sock.on("yourRoom", (roomName: string, ranked?: boolean) => {
 		st.room = roomName;
+		st.roomRanked = ranked !== false;
 		st.changingLobby = false;
 	});
 	sock.on("connect_failed", () => {
@@ -624,11 +646,6 @@ function setupSocket(sock: Socket) {
 		st.gameOver = false;
 		gameOverFade = false;
 		targetChanged = true;
-		if (st.mobile) {
-			hideMenuUI();
-			hideUI(true);
-			document.getElementById("startMenuWrapper")!.style.display = "none";
-		}
 		resize();
 		// unblock an autojoin-at-ENTER that's waiting for this handshake, so
 		// startGame can continue straight into the game (see autoJoinRoom)
@@ -645,30 +662,29 @@ function setupSocket(sock: Socket) {
 			st.messages.serverCreate = a;
 		}
 	});
+	// The clan panel renders off st.player.account.clan / .isClanOwner, so these
+	// handlers only have to update state — they used to poke at DOM nodes that
+	// were captured before the modal existed and were therefore always null.
+	function applyClanMembership(clan: string, isOwner: boolean) {
+		st.player.account.clan = clan;
+		st.player.account.isClanOwner = isOwner;
+		const user = findUserByIndex(st.player.index);
+		if (user) {
+			user.account.clan = clan;
+		}
+	}
 	sock.on("dbClanCreateR", (a, d) => {
 		if (d) {
-			clanSignUp.style.display = "none";
-			clanStats.style.display = "block";
-			clanHeader.textContent = `[${a}] Clan:`;
-			clanAdminPanel.style.display = "block";
-			leaveClanButton.style.display = "inline-block";
-			leaveClanButton.textContent = "DELETE CLAN";
+			applyClanMembership(a, true);
+			st.messages.clanDB = "";
 		} else {
 			st.messages.clanDB = a;
 		}
 	});
 	sock.on("dbClanJoinR", (a, d) => {
 		if (d) {
-			clanSignUp.style.display = "none";
-			clanStats.style.display = "block";
-			clanHeader.textContent = `[${a}] Clan:`;
-			st.player.account.clan = a;
-			const user = findUserByIndex(st.player.index);
-			if (user) {
-				user.account.clan = a;
-			}
-			leaveClanButton.style.display = "inline-block";
-			leaveClanButton.textContent = "Leave Clan";
+			applyClanMembership(a, false);
+			st.messages.clanDB = "";
 		} else {
 			st.messages.clanDB = a;
 		}
@@ -681,23 +697,15 @@ function setupSocket(sock: Socket) {
 	});
 	sock.on("dbClanLevR", (a, d) => {
 		if (!d) return;
-		clanSignUp.style.display = "block";
-		clanStats.style.display = "none";
-		clanHeader.textContent = "Clans";
+		applyClanMembership("", false);
+		st.clanData = {};
 		st.messages.clanDB = a;
-		leaveClanButton.style.display = "none";
 	});
 	sock.on("dbChatR", (a, d) => {
 		st.messages.clanCht = a.text;
 		if (!d) return;
-		if (!a.newURL.match(/^https?:\/\//i)) {
-			a.newURL = `http://${a.newURL}`;
-		}
-		clanChatLink.replaceChildren(
-			<a target="_blank" href={a.newURL} rel="noopener">
-				Clan Chat
-			</a>,
-		);
+		// the widget prefixes a bare host with https:// when it renders the link
+		st.clanData = { ...st.clanData, chatURL: a.newURL };
 	});
 	sock.on("dbChangeUserR", (a, d) => {
 		if (d) {
@@ -756,7 +764,11 @@ function setupSocket(sock: Socket) {
 				gameWidth = st.gameMap.width;
 				gameHeight = st.gameMap.height;
 				mapTileScale = setupData.tileScale;
-				st.players = setupData.usersInRoom;
+				// Merge rather than replace: gameSetup fires on every one of OUR respawns
+				// (respawn -> welcome -> gotit), and swapping in fresh server JSON threw
+				// away every remote player's interpolation buffer and animation phase, so
+				// each death anywhere in the room reset everyone's walk cycle.
+				st.players = mergeRoster(st.players, setupData.usersInRoom);
 				gameMode = st.gameMap.gameMode;
 				document.getElementById("gameModeText")!.textContent =
 					setupData.you.team === "blue" ? gameMode.desc2 : gameMode.desc1;
@@ -765,6 +777,12 @@ function setupSocket(sock: Socket) {
 				setupMap(st.gameMap, mapTileScale, flags);
 				cachedMiniMap = null;
 				deactivateSprays();
+				// The pool is rebuilt per round, and gameSetup runs on every respawn — so
+				// without this reset the array grew by 100 each time. That cost three
+				// extra full iterations per frame forever, and made findServerBullet
+				// return a stale duplicate serverIndex, which silently stopped remote
+				// players' shots from rendering at all.
+				bullets.length = 0;
 				for (let i = 0; i < 100; i++) {
 					const newBullet = new Projectile();
 					newBullet.serverIndex = i;
@@ -1157,8 +1175,46 @@ function hideStatTable() {
 	document.getElementById("linkBoxRight")!.style.display = "none";
 }
 
+/**
+ * Client-only per-player state that the server knows nothing about, and that
+ * must survive a roster refresh. Losing it is what made every respawn in the
+ * room reset everyone's animation and interpolation.
+ */
+function carryClientState(from: Player, to: Player): Player {
+	to.netBuffer = from.netBuffer;
+	to.xSpeed = from.xSpeed ?? 0;
+	to.ySpeed = from.ySpeed ?? 0;
+	to.idleFor = from.idleFor ?? 0;
+	to.animIndex = from.animIndex;
+	to.frameCountdown = from.frameCountdown;
+	to.hitFlash = from.hitFlash;
+	to.nameYOffset = from.nameYOffset;
+	return to;
+}
+
+/** Applies a fresh server roster while preserving client-only render state. */
+function mergeRoster(existing: Player[], incoming: Player[]): Player[] {
+	const byIndex = new Map(existing.map((pl) => [pl.index, pl]));
+	return incoming.map((pl) => {
+		const previous = byIndex.get(pl.index);
+		return previous ? carryClientState(previous, pl) : seedClientState(pl);
+	});
+}
+
+/** Initialises client-only state on a player we're seeing for the first time. */
+function seedClientState(plr: Player): Player {
+	// undefined here meant `Math.abs(undefined) + Math.abs(undefined)` was NaN,
+	// and `NaN > 0` is false — so a newly-received player went straight to the
+	// idle sprite and stayed there
+	plr.xSpeed = 0;
+	plr.ySpeed = 0;
+	plr.idleFor = 0;
+	plr.netBuffer = [];
+	return plr;
+}
+
 function addUser(userString: string) {
-	let parsed;
+	let parsed: Player;
 	try {
 		parsed = JSON.parse(userString);
 	} catch {
@@ -1167,9 +1223,10 @@ function addUser(userString: string) {
 	if (parsed.index !== st.player.index) {
 		const existingUser = findUserByIndex(parsed.index);
 		if (existingUser == null) {
-			st.players.push(parsed);
+			st.players.push(seedClientState(parsed));
 		} else {
-			st.players[st.players.indexOf(existingUser)] = parsed;
+			// the server re-emits "add" on every respawn, not just on join
+			st.players[st.players.indexOf(existingUser)] = carryClientState(existingUser, parsed);
 		}
 	}
 }
@@ -1214,6 +1271,12 @@ function updateUserValue(data: any) {
 	if (data.goa !== undefined) {
 		tmpUser.totalGoals = data.goa;
 	}
+	if (data.li !== undefined) {
+		tmpUser.lastItem = data.li;
+	}
+	if (data.rnk !== undefined) {
+		tmpUser.account.rank = data.rnk;
+	}
 	if (tmpUser.index === st.player.index) {
 		updatePlayerInfo(tmpUser);
 	}
@@ -1221,6 +1284,92 @@ function updateUserValue(data: any) {
 function fetchUserWithIndex(index: number) {
 	socket.emit("ftc", index);
 }
+// How far behind the newest snapshot remote players are rendered. One server
+// tick is 16ms, so this absorbs roughly six late or dropped packets before the
+// buffer runs dry and we have to extrapolate.
+const REMOTE_INTERP_DELAY_MS = 100;
+// Rendered speed (px/ms) below which a remote player counts as standing still.
+// Well under a walk (~0.3 px/ms) but above interpolation and rounding noise.
+const REMOTE_MOVING_THRESHOLD = 0.01;
+// How long a player must be still before the walk cycle drops to the idle frame.
+const ANIM_IDLE_GRACE_MS = 120;
+// Never extrapolate further than this past the newest snapshot; beyond it we
+// hold the last known position rather than inventing motion.
+const REMOTE_EXTRAPOLATE_MAX_MS = 150;
+// Samples older than the render time by more than this are dropped.
+const REMOTE_BUFFER_KEEP_MS = 500;
+
+/** Records one server position sample for a remote player. */
+function pushRemoteSnapshot(plr: Player, packetLength: number, data: number[], cursor: number) {
+	const buffer = (plr.netBuffer ??= []);
+	const previous = buffer[buffer.length - 1];
+	const snapshot: NetSnapshot = {
+		t: performance.now(),
+		x: packetLength > 2 ? data[2 + cursor] : (previous?.x ?? plr.x),
+		y: packetLength > 3 ? data[3 + cursor] : (previous?.y ?? plr.y),
+		angle: packetLength > 4 ? data[4 + cursor] : (previous?.angle ?? plr.angle),
+		// slot 5 used to be nameYOffset, which the server always sent as 0; it now
+		// carries jumpY, without which remote jumps never rendered at all
+		jumpY: packetLength > 5 ? data[5 + cursor] : (previous?.jumpY ?? 0),
+	};
+	buffer.push(snapshot);
+	// a player we have no history for (just spawned, or a long gap in packets)
+	// should appear where the server says, not slide in from wherever they were
+	// last seen
+	if (buffer.length === 1) {
+		plr.x = snapshot.x;
+		plr.y = snapshot.y;
+		plr.angle = snapshot.angle;
+		plr.jumpY = snapshot.jumpY;
+	}
+	if (buffer.length > 32) buffer.splice(0, buffer.length - 32);
+}
+
+/**
+ * Advances every remote player to their interpolated position for this frame.
+ *
+ * Runs once per rendered frame, before drawing. Rendered speed is measured from
+ * the movement this produces, so the walk cycle is driven by motion the player
+ * can actually see rather than by whether a packet happened to arrive.
+ */
+function updateRemoteInterpolation(frameDelta: number) {
+	const renderTime = performance.now() - REMOTE_INTERP_DELAY_MS;
+	for (const plr of st.players) {
+		if (plr.index === st.player.index) continue;
+		const buffer = plr.netBuffer;
+		if (!buffer || buffer.length === 0) {
+			plr.xSpeed = 0;
+			plr.ySpeed = 0;
+			continue;
+		}
+		const previousX = plr.x;
+		const previousY = plr.y;
+
+		const pose = sampleSnapshots(buffer, renderTime, REMOTE_EXTRAPOLATE_MAX_MS);
+		if (pose) {
+			plr.x = pose.x;
+			plr.y = pose.y;
+			plr.jumpY = pose.jumpY;
+			plr.angle = pose.angle;
+		}
+
+		// Rendered speed in px/ms. This is what the walk cycle reads, and it is
+		// non-zero on every frame the player visibly moves — the old per-packet
+		// delta was zero on most frames, which pinned remotes to the idle sprite.
+		if (frameDelta > 0) {
+			plr.xSpeed = Math.abs(plr.x - previousX) / frameDelta;
+			plr.ySpeed = Math.abs(plr.y - previousY) / frameDelta;
+		}
+
+		const currentWeapon = getCurrentWeapon(plr);
+		if (currentWeapon) {
+			currentWeapon.front = isWeaponFacingFront(snapAngleToCardinal(plr.angle));
+		}
+
+		pruneSnapshots(buffer, renderTime, REMOTE_BUFFER_KEEP_MS);
+	}
+}
+
 function receiveServerData(data: number[]) {
 	if (!st.gameOver) {
 		st.players.forEach((obj) => {
@@ -1231,6 +1380,8 @@ function receiveServerData(data: number[]) {
 			const playerIndex = data[1 + cursor];
 			const tmpUser = findUserByIndex(playerIndex);
 			if (playerIndex === st.player.index && tmpUser != null) {
+				// the local player is predicted and reconciled below, so the server's
+				// position is authoritative and applied directly
 				if (packetLength > 2) {
 					tmpUser.x = data[2 + cursor];
 				}
@@ -1240,29 +1391,21 @@ function receiveServerData(data: number[]) {
 				if (packetLength > 4) {
 					tmpUser.angle = data[4 + cursor];
 				}
-				if (packetLength > 5) {
+				// slot 5 is jumpY (our own jump is predicted locally, so it's ignored
+				// here); slot 6 carries this client's last-applied input number
+				if (packetLength > 6) {
+					tmpUser.isn = data[6 + cursor];
+				} else if (packetLength > 5) {
 					tmpUser.isn = data[5 + cursor];
 				}
 				tmpUser.onScreen = true;
 			} else if (tmpUser != null) {
-				if (packetLength > 2) {
-					tmpUser.xSpeed = Math.abs(tmpUser.x - data[2 + cursor]);
-					tmpUser.x = data[2 + cursor];
-				}
-				if (packetLength > 3) {
-					tmpUser.ySpeed = Math.abs(tmpUser.y - data[3 + cursor]);
-					tmpUser.y = data[3 + cursor];
-				}
-				if (packetLength > 4) {
-					tmpUser.angle = data[4 + cursor];
-				}
-				const currentWeapon = getCurrentWeapon(tmpUser);
-				if (currentWeapon) {
-					currentWeapon.front = isWeaponFacingFront(snapAngleToCardinal(tmpUser.angle));
-				}
-				if (packetLength > 5) {
-					tmpUser.nameYOffset = data[5 + cursor];
-				}
+				// Remote players are buffered, never snapped. Assigning x/y straight
+				// from the packet is what made them teleport: they moved only when a
+				// packet landed, while the local player moved every frame.
+				// updateRemoteInterpolation replays this buffer smoothly, one render
+				// delay behind.
+				pushRemoteSnapshot(tmpUser, packetLength, data, cursor);
 				tmpUser.onScreen = true;
 			} else {
 				fetchUserWithIndex(playerIndex);
@@ -1296,7 +1439,7 @@ function receiveServerData(data: number[]) {
 			plr.oldY = plr.y;
 			plr.x += horizontalDelta * plr.speed * thisInput[inputCursor].delta;
 			plr.y += verticalDelta * plr.speed * thisInput[inputCursor].delta;
-			wallCol(plr, st.gameMap.tiles, clutter);
+			wallCol(plr, st.gameMap, clutter);
 			inputCursor++;
 		}
 		plr.x = Math.round(plr.x);
@@ -1429,7 +1572,7 @@ let currentFPS = 0;
 let fpsUpdateDelta = 0;
 let fpsSamples: number[] = [];
 function updateGameLoop() {
-	delta = currentTime - oldTime;
+	delta = Math.min(MAX_FRAME_DELTA_MS, Math.max(0, currentTime - oldTime));
 
 	currentFPS = delta ? 1000 / delta : 0;
 	fpsSamples.push(currentFPS);
@@ -1460,6 +1603,12 @@ function updateGameLoop() {
 	if (keys.s) {
 		doJump = 0;
 	}
+	// virtual stick (TouchControls) feeds analog axes straight in; clampMovementInput
+	// on the server already accepts any float in [-1, 1] here
+	if (touchMove.active) {
+		horizontalDT = touchMove.x;
+		verticalDT = touchMove.y;
+	}
 	var b = horizontalDT;
 	var d = verticalDT;
 	var e = Math.sqrt(horizontalDT * horizontalDT + verticalDT * verticalDT);
@@ -1467,6 +1616,10 @@ function updateGameLoop() {
 		b /= e;
 		d /= e;
 	}
+	// Remote players are advanced along their snapshot buffer before anything
+	// reads their position this frame — the walk cycle below measures the motion
+	// this produces.
+	updateRemoteInterpolation(delta);
 	const clientPrediction = true;
 	if (clientPrediction) {
 		for (const plr of st.players) {
@@ -1477,7 +1630,7 @@ function updateGameLoop() {
 					plr.x += b * plr.speed * delta;
 					plr.y += d * plr.speed * delta;
 				}
-				wallCol(plr, st.gameMap.tiles, clutter);
+				wallCol(plr, st.gameMap, clutter);
 				plr.x = Math.round(plr.x);
 				plr.y = Math.round(plr.y);
 				plr.angle = ((target.f + Math.PI * 2) % (Math.PI * 2)) * (180 / Math.PI) + 90;
@@ -1533,12 +1686,27 @@ function updateGameLoop() {
 			}
 			if (st.gameOver) {
 				plr.animIndex = 0;
+				plr.idleFor = 0;
 			} else {
-				let movementDelta = Math.abs(b) + Math.abs(d);
-				if (plr.index !== st.player.index) {
-					movementDelta = Math.abs(plr.xSpeed!) + Math.abs(plr.ySpeed!);
+				// Local player: read the live key state. Remote players: read the
+				// rendered speed produced by updateRemoteInterpolation, in px/ms.
+				let isMoving: boolean;
+				if (plr.index === st.player.index) {
+					isMoving = Math.abs(b) + Math.abs(d) > 0;
+				} else {
+					isMoving = (plr.xSpeed ?? 0) + (plr.ySpeed ?? 0) > REMOTE_MOVING_THRESHOLD;
 				}
-				if (movementDelta > 0) {
+				// Hysteresis. Advancing one walk frame needs 160ms of motion
+				// (frameCountdown 40, decremented by delta/4), so dropping straight to
+				// the idle frame on a single still sample meant the cycle was reset
+				// before it ever reached frame 1 — which is why remote players never
+				// appeared to animate. Require a sustained stop instead.
+				if (isMoving) {
+					plr.idleFor = 0;
+				} else {
+					plr.idleFor = (plr.idleFor ?? 0) + delta;
+				}
+				if (isMoving || (plr.idleFor ?? 0) < ANIM_IDLE_GRACE_MS) {
 					plr.frameCountdown -= delta / 4;
 					if (plr.frameCountdown <= 0) {
 						plr.animIndex++;
@@ -1554,6 +1722,9 @@ function updateGameLoop() {
 					}
 				} else if (plr.animIndex !== 0) {
 					plr.animIndex = 0;
+					// reset the phase too, or the residual countdown makes the next
+					// step land at an arbitrary point in the cycle
+					plr.frameCountdown = 40;
 				}
 				if (plr.jumpY > 0) {
 					plr.animIndex = 1;
@@ -1574,7 +1745,7 @@ function updateGameLoop() {
 		} else if (st.gameStart) {
 			doGame(delta);
 			drawOverlay(graph, false, true);
-			if (!st.mobile && targetChanged) {
+			if (targetChanged) {
 				targetChanged = false;
 				socket.emit("0", target.f);
 			}
@@ -1661,9 +1832,6 @@ function doGame(delta: number) {
 			-st.shake.y +
 			target.dOffset * Math.sin(target.f + Math.PI);
 
-		if (fillCounter > 1 && socket) {
-			socket.emit("kil");
-		}
 	}
 	drawBackground();
 	drawMap(0);
@@ -1683,7 +1851,6 @@ function doGame(delta: number) {
 	drawUI();
 	drawMiniMapCounter--;
 	if (drawMiniMapCounter <= 0 && st.gameStart) {
-		fillCounter = 0;
 		drawMiniMapCounter = drawMiniMapFPS;
 		drawMiniMap();
 	}
@@ -1768,7 +1935,6 @@ mapContext.lineWidth = pingScale / 2;
 
 var cachedMiniMap: HTMLCanvasElement | null = null;
 function getCachedMiniMap() {
-	fillCounter++;
 	if (cachedMiniMap == null && st.gameMap?.tiles.length > 0) {
 		let baseCanvasElem = document.createElement("canvas");
 		let baseCtx = baseCanvasElem.getContext("2d")!;
@@ -2064,7 +2230,7 @@ function updateBulletsAndDrawTrails(delta: number) {
 	graph.globalAlpha = 1;
 	for (const bullet of bullets) {
 		bullet.wasActiveThisFrame = bullet.active;
-		bullet.update(delta, currentTime, clutter, st.gameMap.tiles, st.players);
+		bullet.update(delta, currentTime, clutter, st.gameMap, st.players);
 		if (st.settings.showBTrails && bullet.trailAlpha > 0) {
 			let x = Math.round(bullet.startX - st.startX);
 			let y = Math.round(bullet.startY - st.startY);
@@ -2344,6 +2510,17 @@ function updateMenuInfo(info: string) {
 	mainTitleText.textContent = info;
 }
 
+// One <style> element reused across mod loads, and a blob-URL setter that frees
+// the URL it replaces. Asset URLs live in localStorage, so without this every mod
+// switch leaked the previous pack's blobs for the rest of the session.
+let modStyleElement: HTMLStyleElement | null = null;
+function setAssetUrl(key: string, url: string) {
+	const previous = localStorage.getItem(key);
+	// only revoke what we own; a URL from an earlier page load is already dead
+	if (previous?.startsWith("blob:")) URL.revokeObjectURL(previous);
+	localStorage.setItem(key, url);
+}
+
 var linkedMod = location.hash.replace("#", "");
 const assetsLoadPromise = loadModPack(linkedMod, linkedMod === "");
 var loadingTexturePack = false;
@@ -2380,7 +2557,9 @@ async function loadModPack(url: string, isBaseAssets: boolean) {
 				if (modPath.startsWith("/")) {
 					modPath = `${window.location.origin}${modPath}`;
 				} else if (!modPath.match(/^https?:\/\//i)) {
-					modPath = `http://${modPath}`;
+					// https, not http: the game is served over TLS in production, so an
+					// http:// mod URL is blocked outright as mixed content
+					modPath = `https://${modPath}`;
 				}
 			} else {
 				modPath = `https://dl.dropboxusercontent.com/s/${url}/vertixmod.zip`;
@@ -2403,9 +2582,13 @@ async function loadModPack(url: string, isBaseAssets: boolean) {
 				if (entry.filename.includes("modinfo")) {
 					setModInfoText(data);
 				} else if (entry.filename.includes("cssmod")) {
-					let styleElem = document.createElement("style");
-					styleElem.textContent = data;
-					document.head.appendChild(styleElem);
+					// reuse one <style> element: appending a new one per load meant every
+					// mod you tried stayed stacked in <head> for the rest of the session
+					if (!modStyleElement) {
+						modStyleElement = document.createElement("style");
+						document.head.appendChild(modStyleElement);
+					}
+					modStyleElement.textContent = data;
 				} else if (entry.filename.includes("gameinfo")) {
 					data = data.replace(/(\r\n|\n|\r)/gm, "");
 					let parsed = JSON.parse(data);
@@ -2431,13 +2614,11 @@ async function loadModPack(url: string, isBaseAssets: boolean) {
 				}
 			} else if (basePath === "sprites") {
 				let data = await entry.getData(new zip.BlobWriter("image/png"));
-				let imgAsDataURL = URL.createObjectURL(data);
-				localStorage.setItem(entry.filename, imgAsDataURL);
+				setAssetUrl(entry.filename, URL.createObjectURL(data));
 			} else if (basePath === "sounds") {
 				entry.filename = entry.filename.replace(`.${fileFormat}`, "");
 				let data = await entry.getData(new zip.BlobWriter(`audio/${fileFormat}`));
-				let soundAsDataURL = URL.createObjectURL(data);
-				localStorage.setItem(`${entry.filename}data`, soundAsDataURL);
+				setAssetUrl(`${entry.filename}data`, URL.createObjectURL(data));
 				localStorage.setItem(`${entry.filename}format`, fileFormat);
 			}
 		}
@@ -2659,6 +2840,12 @@ function getWeaponSprite(weaponIndex: number, camo: number, angle: number) {
 		} else {
 			wepSprite = wepSprites.downSprite;
 		}
+		// sprites come from async-loading blob URLs, so this can run before the
+		// weapon image has decoded. Caching the resulting 0x0 canvas made the weapon
+		// render as nothing for the rest of the session, and the camo pass below then
+		// threw InvalidStateError on every load. Both callers null-check, so bail and
+		// let a later frame build it once the image is actually there.
+		if (!wepSprite.isLoaded || !wepSprite.width || !wepSprite.height) return;
 		let canvasElem = document.createElement("canvas");
 		let ctx = canvasElem.getContext("2d")!;
 		ctx.imageSmoothingEnabled = false;
@@ -3591,7 +3778,12 @@ function getCachedShadow(
 
 function callUpdate() {
 	requestAnimationFrame(callUpdate);
-	currentTime = Date.now();
+	// performance.now(), not Date.now(): the latter has 1ms resolution, so at
+	// 144Hz delta alternated 6/7 and at 240Hz many frames measured 0 — micro-
+	// stutter for the local player, and zeros that the server then rounded UP to
+	// MIN_MOVEMENT_DELTA (8ms), permanently over-integrating high-refresh clients
+	// and snapping them back on every reconciliation.
+	currentTime = performance.now();
 	updateGameLoop();
 }
 callUpdate();

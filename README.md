@@ -6,14 +6,14 @@ A web-based multiplayer arena shooter — a modern revival of Vertix Online. Bui
 
 ### Gameplay
 - **9 Game Modes**: Free For All, Team Deathmatch, Hardpoint, Lootcrate, Sniper War, Boss Hunt, Zone War, Rocket War, Pyro War
-- **6 Character Classes**: Triggerman, Detective, Hunter, Run N Gun, Vince, Rocketeer — each with unique primary/secondary weapons
+- **10 Selectable Classes**: Triggerman, Detective, Hunter, Run N Gun, Vince, Rocketeer and more — each with unique primary/secondary weapons (plus mode-assigned boss classes the player cannot pick)
 - **24 Handcrafted Maps** with mode-specific rotations
 - **Real-time multiplayer** via Socket.IO with room browser, private rooms, and room codes
 - **Bot AI** for filling empty slots
 - **Custom Mods** — load community texture packs via URL or local files
 
 ### Account & Progression
-- **Account System** — register with username/password or Discord OAuth
+- **Account System** — Discord OAuth (the only login method); guests can play without an account
 - **Ranked Progression** — earn score to rank up (every 1,000 score), cosmetic unlocks at score milestones
 - **Crate Reward System** — earn crates on rank up, open them for random cosmetics weighted by rarity
 - **127 Hats, 133+ Camos, 70+ Shirts** — each with rarity tiers (Common → Legendary)
@@ -21,12 +21,12 @@ A web-based multiplayer arena shooter — a modern revival of Vertix Online. Bui
 ### Quest System
 - **Daily Quests** — 3 random quests per day (UTC midnight rotation), earn score or crate rewards
 - **Weekly Challenge** — 1 harder quest per week (Monday UTC rotation), earn crates
-- **Login Streak** — consecutive daily logins build a 7-day streak, day 7 grants +1 crate
+- **Login Streak** — consecutive daily logins build a 7-day streak; day 7 grants +1 crate and the track rolls back to day 1
 - **Quest Tracking** — progress tracked from kills, damage, wins, goals, healing per round
 - **Claim Rewards** — click CLAIM on completed quests to receive score bonuses or crates
 
 ### Social
-- **Clans** — create or join 4-letter clans, clan leaderboards, invite/kick members
+- **Clans** — create or join 4-letter clans, clan leaderboards, owner add/kick (there is no invite/accept flow — an "invite" adds the named player directly)
 - **Friends** — see who's online, Discord-linked friend directory
 - **Leaderboards** — rank, KDR, kills, clan rank, clan KDR
 - **Profile Pages** — public profile at `/profile.html?username`
@@ -44,7 +44,7 @@ A web-based multiplayer arena shooter — a modern revival of Vertix Online. Bui
 | Frontend | Svelte 5 (runes), Vite 8 (MPA) |
 | Backend | Hono (HTTP), Socket.IO (real-time) |
 | Database | SQLite via better-sqlite3 |
-| Auth | bcrypt + JWT (jose), Discord OAuth2 |
+| Auth | Discord OAuth2, JWT sessions (jose) |
 | Build | pnpm monorepo |
 | Deploy | Docker + Docker Compose |
 
@@ -144,14 +144,20 @@ Open http://localhost:5173
    ```
    NODE_ENV=production
    SESSION_SECRET=<random-64-char-string>
-   CORS_ORIGINS=https://vertix.fr
+   CORS_ORIGINS=https://vertix.vestiges.tech
+   TRUST_PROXY=1
    ```
+
+   `TRUST_PROXY` is the number of reverse proxies in front of the server (nginx or
+   Nginx Proxy Manager = 1). It is **required** behind a proxy: without it every
+   player shares one rate-limit key, because the proxy address is the only one the
+   server sees — which caps the whole server at the per-IP connection limit.
 
 2. (Optional) Set up Discord OAuth:
    ```
    DISCORD_CLIENT_ID=your-app-id
    DISCORD_CLIENT_SECRET=your-secret
-   DISCORD_REDIRECT_URI=https://vertix.fr/api/auth/discord/callback
+   DISCORD_REDIRECT_URI=https://vertix.vestiges.tech/api/auth/discord/callback
    ```
    The redirect URI must be the same origin players open the game on and must be
    registered in the [Discord developer portal](https://discord.com/developers/applications).
@@ -162,7 +168,47 @@ Open http://localhost:5173
    docker compose up -d
    ```
 
-4. The server runs on ports `1118` (HTTP) and `1119` (Socket.IO in dev).
+4. The server runs on port `1118` in production (page + `/api` + Socket.IO). Port
+   `1119` is dev-only, where Vite proxies the socket separately.
+
+### Reverse proxy
+
+In production the Node server serves the built frontend, `/api` **and** Socket.IO
+all on port `1118`, so one proxy rule covers everything — the websocket upgrade
+included. `nginx.conf` in the repo root is a ready-to-use vhost for a plain nginx +
+certbot host; if you run Nginx Proxy Manager instead, forward
+`https://vertix.vestiges.tech` → `http://server:1118` with websockets enabled.
+
+Either way the proxy must send `X-Forwarded-For` and the server must have
+`TRUST_PROXY=1`, or per-IP rate limiting collapses onto a single key.
+
+### Logs & health
+
+`docker compose logs -f server` shows a boot sequence (maps, database, CORS, Discord
+config, rooms, listen port), then real gameplay events — players joining and leaving
+with their session length and score, chat, rounds ending, rooms opening and closing —
+plus a `[status]` heartbeat every minute with uptime and which rooms have players.
+
+Bot-vs-bot kills and bot spawns are logged at `debug`, not `info`: with 9 permanent
+rooms of bots fighting continuously they drown out everything else. Set
+`LOG_LEVEL=debug` in `.env` when you actually want them, or `STATUS_INTERVAL_MS=0`
+to silence the heartbeat.
+
+`GET /api/health` answers with uptime, room count and the human/bot player split —
+useful for a proxy health check or a quick `curl` from the host:
+
+```bash
+docker compose exec server wget -qO- http://localhost:1118/api/health
+```
+
+### Typechecking and tests
+
+`pnpm typecheck` runs `svelte-check` over the client and `tsc --noEmit` over the
+server; both are expected to be clean. `pnpm test` runs the unit tests. The Docker
+build runs both of the client-side halves, so a type error or a failing test fails
+the image instead of shipping.
+
+`pnpm audit --prod` should report no vulnerabilities.
 
 ## Quest System Details
 
@@ -193,7 +239,7 @@ Open http://localhost:5173
 | Day | Reward |
 |-----|--------|
 | 1-6 | +50 SCORE each |
-| 7 | +1 CRATE (resets streak) |
+| 7 | +1 CRATE, then the track restarts at day 1 |
 
 Quest score rewards are **bonus score** — they do not affect ranking.
 
@@ -206,26 +252,49 @@ Quest score rewards are **bonus score** — they do not affect ranking.
 - [ ] Quest variety — mode-specific quests (e.g. "Win 3 rounds of Hardpoint")
 - [ ] Quest rarity tiers — daily/epic/legendary quest pools
 - [ ] Seasonal events — limited-time quest chains with exclusive rewards
-- [ ] Mobile UI pass — responsive layout for smaller screens
 - [ ] Input validation overhaul — standard-schema integration for socket events
+      (the highest-risk fields are clamped in `security.ts`, but validation is
+      still ad hoc per handler)
+- [ ] Session revocation — logout only clears the cookie, so a leaked JWT stays
+      valid for its full 7 days
+- [ ] `/api/friends` returns the whole Discord-linked directory; paginate it
 - [ ] Game over menu — finish moving from JSX to Svelte
 
 ### Medium Priority
-- [ ] Room system improvements — clearer side effects, clean open/close for custom rooms
 - [ ] Socket reconnection — simplify `setupSocket` logic, reuse `io` instance across room switches
 - [ ] Hardpoint scoring — server-authoritative score updates independent of client emits
 - [ ] Player spawn — don't show on leaderboard until first spawned in current round
+- [ ] Bot self-damage — Rocketeer/Nademan bots fire at targets inside their own blast
+      radius and suicide; `BOT_PREFERRED_RANGE` doesn't account for splash
+- [ ] Shared weapon objects — `Game.weapons` is one `structuredClone` per room, so
+      `spreadIndex` and `camo` are shared by every player in that room
 
 ### Low Priority
 - [ ] Character jump strength variation per class
 - [ ] Wall clipping fix — head through wall when jumping against bottom
-- [ ] Room player limit enforcement (8 max)
-- [ ] Accidental click-out protection — dedicated "join" button in room browser
 - [ ] Spawn positioning — players shouldn't appear inside walls after countdown
 - [ ] Bullet behavior — overshoot fix at wall corners, double-fire on quick weapon switch
 - [ ] Bullet holes on non-explosive barrels (render order consideration)
 
 ### Completed
+- [x] Remote-player interpolation — snapshot buffer + render delay; bots move on the
+      position tick instead of in 100ms jumps, and remote jumps now render
+- [x] Movement time budget — per-packet delta clamping alone allowed ~25x speed by
+      flooding inputs; simulated time can no longer outrun wall-clock
+- [x] `cSrv` host check — permanent rooms have no host secret, and `null !== null`
+      let any client password-lock or restart the public rooms
+- [x] Trusted-proxy client IP — socket.io saw only the proxy address, which capped
+      the whole server at the per-IP connection limit
+- [x] Security headers on the served app, not just `/api`
+- [x] Clamped `targetD` / `jumpY` / `targetF` and server-side shot timestamps
+- [x] Server-authoritative fire rate, ammo and class validation
+- [x] Private rooms no longer affect stats, rank or quests
+- [x] Room browser select-then-join (no more accidental click-out)
+- [x] Room player limit enforcement (8 max, bots yield their slot)
+- [x] Audio settings — master/music/effects volume and mute
+- [x] Profile editing (username + channel)
+- [x] Tile-grid collision lookup — wallCol 6x faster, bullets 2.5x faster
+- [x] Mobile UI pass — responsive layout and on-screen touch controls
 - [x] Quest system (daily, weekly, streak)
 - [x] Modal close button → X cross at top-right
 - [x] Account system with login/register/Discord OAuth

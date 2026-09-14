@@ -71,14 +71,19 @@ export type BotState = {
 	targetIndex: number | null;
 	targetAcquiredAt: number;
 	lastShotAt: number;
-	shotsSinceReload: number;
-	reloadUntil: number;
 	respawnAt: number;
 	lastX: number;
 	lastY: number;
 	stuckSince: number;
 	strafeDir: 1 | -1;
 	strafeUntil: number;
+	// The brain runs at BOT_TICK_MS, but movement is integrated on the much finer
+	// position tick so bots produce smooth per-tick positions instead of one
+	// 100ms teleport every sixth broadcast. These hold the current intent between
+	// decisions; `jump` is consumed once rather than repeating every step.
+	moveX: number;
+	moveY: number;
+	jump: 0 | 1;
 };
 
 export function createBotState(difficulty: BotDifficulty): BotState {
@@ -87,13 +92,14 @@ export function createBotState(difficulty: BotDifficulty): BotState {
 		targetIndex: null,
 		targetAcquiredAt: 0,
 		lastShotAt: 0,
-		shotsSinceReload: 0,
-		reloadUntil: 0,
 		respawnAt: 0,
 		lastX: 0,
 		lastY: 0,
 		stuckSince: 0,
 		strafeDir: Math.random() < 0.5 ? 1 : -1,
 		strafeUntil: 0,
+		moveX: 0,
+		moveY: 0,
+		jump: 0,
 	};
 }

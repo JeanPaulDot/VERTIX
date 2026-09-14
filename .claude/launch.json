@@ -13,7 +13,7 @@
 			"runtimeArgs": [
 				"-NoProfile",
 				"-Command",
-				"$env:NODE_ENV='production'; node --import ./server/import-hooks.ts server/index.ts"
+				"$env:NODE_ENV='production'; $env:TRUST_PROXY='1'; node --env-file=.env --import ./server/import-hooks.ts server/index.ts"
 			],
 			"port": 1118
 		}

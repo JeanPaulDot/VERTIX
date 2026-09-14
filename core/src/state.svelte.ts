@@ -31,7 +31,7 @@ export type CrateWonItem = {
 
 function getCosmeticPref<T extends { id: number }>(data: T[], key: string): T | null {
 	const value = localStorage.getItem(key);
-	console.debug(`loading ${value} from ${key}`);
+	if (import.meta.env.DEV) console.debug(`loading ${value} from ${key}`);
 	if (value && !Number.isNaN(parseInt(value)))
 		return data.find((item) => item.id === parseInt(value)) ?? null;
 	return null;
@@ -61,6 +61,24 @@ function parseStoredObject(key: string): object {
 		return {};
 	}
 }
+
+/**
+ * Touch-first device? Capability first (a coarse pointer means no hover and no
+ * mouse), user-agent only as a fallback for older engines. The old check was
+ * UA-only, which misclassified touch laptops and Android tablets.
+ */
+const isTouchDevice =
+	typeof window !== "undefined" &&
+	(window.matchMedia?.("(pointer: coarse)").matches === true ||
+		/Android|webOS|iPhone|iPad|iPod|BlackBerry/i.test(navigator.userAgent));
+
+// Phones can't hold 60fps with the full effect stack, so they start on a lighter
+// preset. Only the defaults change — anything the player saved still wins below.
+const graphicsDefaults = isTouchDevice
+	? { showParticles: false, showTrippy: false, showSprays: false, showFade: false,
+		showShadows: false, showGlows: false, showBTrails: false }
+	: { showParticles: true, showTrippy: false, showSprays: true, showFade: true,
+		showShadows: true, showGlows: true, showBTrails: true };
 
 export const st = $state({
 	gameMap: null as unknown as MapData,
@@ -137,9 +155,11 @@ export const st = $state({
 	gameStart: false,
 	gameOver: false,
 	currentLiked: null as number | null,
-	mobile: false,
+	mobile: isTouchDevice,
 	socket: null as Socket | null,
 	room: null as string | null,
+	// false for private/custom rooms, whose rounds don't count toward stats or quests
+	roomRanked: true,
 	// which main-menu modal is open (null = none)
 	menuModal: null as null | "account" | "rooms" | "settings" | "controls" | "mods",
 	// quest system state
@@ -165,15 +185,15 @@ export const st = $state({
 	settings: Object.assign(
 		{
 			showNames: true,
-			showParticles: true,
-			showTrippy: false,
-			showSprays: true,
-			showFade: true,
-			showShadows: true,
-			showGlows: true,
-			showBTrails: true,
+			...graphicsDefaults,
 			showChat: true,
 			showUI: true,
+			// audio: there was no volume control of any kind before, only the
+			// implicit on/off of st.doSounds (which the mod loader owns)
+			muted: false,
+			masterVolume: 1,
+			musicVolume: 0.5,
+			sfxVolume: 1,
 			showPINGFPS: true,
 			showLeader: true,
 			// default true: preserves the always-visible ALL/TEAM toggle that existed

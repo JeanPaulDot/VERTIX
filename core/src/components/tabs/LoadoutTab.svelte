@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { PLAYER_SELECTABLE_CLASS_COUNT } from "../../loadouts.ts";
 	import { st } from "../../state.svelte.ts";
 	import { getItemRarityColor, getUnlockScoreThreshold } from "../../utils.ts";
 	import CosmeticTooltip from "./CosmeticTooltip.svelte";
@@ -21,7 +22,7 @@
 
 	// sync preferences to localStorage
 	function savePref(key: string, value: string | undefined) {
-		console.debug(`saving ${value} to ${key}`);
+		if (import.meta.env.DEV) console.debug(`saving ${value} to ${key}`);
 		if (value) {
 			localStorage.setItem(key, value);
 		} else {
@@ -138,7 +139,7 @@
 <div style:display={currentScreen === "class" ? "block" : "none"}>
 	<h3 class="menuHeaderTabbed">SELECT CLASS</h3>
 	<div id="classList">
-		{#each st.characterClasses.filter(c => c.classN !== "???") as cls}
+		{#each st.characterClasses.slice(0, PLAYER_SELECTABLE_CLASS_COUNT) as cls}
 			<div class="hatSelectItem" onclick={() => {st.loadout.class = cls; currentScreen = "main"}}>{cls.classN}</div>
 		{/each}
 	</div>

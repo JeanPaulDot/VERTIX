@@ -29,6 +29,9 @@
 			Joining...
 		{:else}
 			{st.room ?? "None selected"}
+			{#if st.room && !st.roomRanked}
+				<span class="unrankedTag" title="Private rooms don't count toward stats or quests">UNRANKED</span>
+			{/if}
 		{/if}
 	</span>
 	<button type="button" class="smallMenuButton" onclick={() => st.menuModal = "rooms"}>BROWSE ROOMS</button>
@@ -112,6 +115,14 @@
 	}
 	#currentRoomRow .smallMenuButton {
 		flex: none;
+	}
+	.unrankedTag {
+		font-size: 10px;
+		background: #e0b04a;
+		color: #fff;
+		padding: 1px 5px;
+		border-radius: 1px;
+		margin-left: 4px;
 	}
 
 	#leaderButton {

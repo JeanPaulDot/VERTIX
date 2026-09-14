@@ -23,7 +23,9 @@ function thresholdForChance(chance: number): number {
 	return Number.POSITIVE_INFINITY;
 }
 
-export type UnlockedItem = { name: string; chance: number };
+// carries type+id as well as the display fields so callers can render the item's
+// image and tooltip (the scoreboard's "Last Reward" cell needs all four)
+export type UnlockedItem = { type: UnlockItemType; id: number; name: string; chance: number };
 
 /**
  * Grants any hat/shirt/camo unlocks the player's lifetime score newly
@@ -37,19 +39,20 @@ export function checkForNewUnlocks(userId: number, lifetimeScore: number): Unloc
 	for (const hat of hats) {
 		if (hat.chance <= 0) continue;
 		if (lifetimeScore < thresholdForChance(hat.chance)) continue;
-		if (grantUnlock(userId, "hat", hat.id)) newlyUnlocked.push({ name: hat.name, chance: hat.chance });
+		if (grantUnlock(userId, "hat", hat.id))
+			newlyUnlocked.push({ type: "hat", id: hat.id, name: hat.name, chance: hat.chance });
 	}
 	for (const shirt of shirts) {
 		if (shirt.chance <= 0) continue;
 		if (lifetimeScore < thresholdForChance(shirt.chance)) continue;
 		if (grantUnlock(userId, "shirt", shirt.id))
-			newlyUnlocked.push({ name: shirt.name, chance: shirt.chance });
+			newlyUnlocked.push({ type: "shirt", id: shirt.id, name: shirt.name, chance: shirt.chance });
 	}
 	for (const camo of camos) {
 		if (camo.chance <= 0) continue;
 		if (lifetimeScore < thresholdForChance(camo.chance)) continue;
 		if (grantUnlock(userId, "camo", camo.id))
-			newlyUnlocked.push({ name: camo.name, chance: camo.chance });
+			newlyUnlocked.push({ type: "camo", id: camo.id, name: camo.name, chance: camo.chance });
 	}
 
 	return newlyUnlocked;

@@ -124,47 +124,42 @@ export function getDb(): Database.Database {
 
 // --- User queries ---
 
-export function findUserByUsername(username: string) {
+/**
+ * One row of the `users` table. All three lookups below are `SELECT *`, so they
+ * all return this same shape — declaring narrower per-function types is what made
+ * getProfile unable to see discord_avatar and left createDiscordUser's result
+ * incompatible with findUserByDiscordId's.
+ *
+ * `email` / `password_hash` are vestigial: login has been Discord-only since the
+ * password auth was removed, but the columns remain for the old rows.
+ */
+export type UserRow = {
+	id: number;
+	username: string;
+	email: string;
+	password_hash: string;
+	discord_id: string | null;
+	discord_username: string;
+	discord_avatar: string;
+	hat_id: number;
+	shirt_id: number;
+	channel: string;
+	created_at: string;
+};
+
+export function findUserByUsername(username: string): UserRow | undefined {
 	return getDb().prepare("SELECT * FROM users WHERE username = ?").get(username) as
-		| {
-				id: number;
-				username: string;
-				email: string;
-				password_hash: string;
-				hat_id: number;
-				shirt_id: number;
-				channel: string;
-				created_at: string;
-		  }
+		| UserRow
 		| undefined;
 }
 
-export function findUserById(id: number) {
-	return getDb().prepare("SELECT * FROM users WHERE id = ?").get(id) as
-		| {
-				id: number;
-				username: string;
-				email: string;
-				password_hash: string;
-				discord_id: string | null;
-				discord_username: string;
-				discord_avatar: string;
-				channel: string;
-		  }
-		| undefined;
+export function findUserById(id: number): UserRow | undefined {
+	return getDb().prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow | undefined;
 }
 
-export function findUserByDiscordId(discordId: string) {
+export function findUserByDiscordId(discordId: string): UserRow | undefined {
 	return getDb().prepare("SELECT * FROM users WHERE discord_id = ?").get(discordId) as
-		| {
-				id: number;
-				username: string;
-				email: string;
-				password_hash: string;
-				discord_id: string;
-				discord_username: string;
-				discord_avatar: string;
-		  }
+		| UserRow
 		| undefined;
 }
 
@@ -182,18 +177,50 @@ export function getDiscordConnectedUsers(): {
 		.all() as { username: string; discord_username: string; discord_avatar: string }[];
 }
 
+/**
+ * Creates a Discord-linked account and its empty stats row in one transaction,
+ * returning the full row. The stats row matters: getProfile and
+ * buildAccountPayload both return null without one, so an account created
+ * without it has no profile page and no account chip.
+ */
 export function createDiscordUser(data: {
 	discordId: string;
 	discordUsername: string;
 	discordAvatar: string;
 	username: string;
-}): { id: number; username: string } {
-	const stmt = getDb().prepare(
-		`INSERT INTO users (username, discord_id, discord_username, discord_avatar)
-		 VALUES (?, ?, ?, ?)`,
-	);
-	const result = stmt.run(data.username, data.discordId, data.discordUsername, data.discordAvatar);
-	return { id: Number(result.lastInsertRowid), username: data.username };
+}): UserRow {
+	const run = getDb().transaction(() => {
+		const result = getDb()
+			.prepare(
+				`INSERT INTO users (username, discord_id, discord_username, discord_avatar)
+				 VALUES (?, ?, ?, ?)`,
+			)
+			.run(data.username, data.discordId, data.discordUsername, data.discordAvatar);
+		const id = Number(result.lastInsertRowid);
+		getDb().prepare("INSERT OR IGNORE INTO player_stats (user_id) VALUES (?)").run(id);
+		return id;
+	});
+	const id = run();
+	return getDb().prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow;
+}
+
+/** Case-insensitive username lookup, for uniqueness checks on profile edits. */
+export function findUserByUsernameInsensitive(username: string): UserRow | undefined {
+	return getDb()
+		.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE")
+		.get(username) as UserRow | undefined;
+}
+
+/** Applies a profile edit. Returns false if the username is already taken. */
+export function updateUserProfile(userId: number, username: string, channel: string): boolean {
+	try {
+		getDb()
+			.prepare("UPDATE users SET username = ?, channel = ? WHERE id = ?")
+			.run(username, channel, userId);
+		return true;
+	} catch {
+		return false; // UNIQUE constraint on users.username
+	}
 }
 
 // --- Stats queries ---
@@ -304,6 +331,15 @@ export function popOldestUnopenedCrate(userId: number): { id: number; source: st
 	return run();
 }
 
+/**
+ * Puts a popped crate back in the unopened pile. Used when the roll that follows
+ * a pop yields nothing (the account already owns every cosmetic), which would
+ * otherwise consume the crate and hand back no reward.
+ */
+export function restoreCrate(crateId: number): void {
+	getDb().prepare("UPDATE user_crates SET opened_at = NULL WHERE id = ?").run(crateId);
+}
+
 /** Every account's lifetime score, for one-off migration backfills. */
 export function getAllUserScores(): { user_id: number; score: number }[] {
 	return getDb().prepare("SELECT user_id, score FROM player_stats").all() as {
@@ -369,13 +405,22 @@ export function upsertQuest(
 		.run(userId, questType, questKey, name, rewardType, rewardAmount, goal, periodStart);
 }
 
-export function incrementQuestProgress(userId: number, questKey: string, amount: number, periodStart: string): void {
+// quest_type is part of the WHERE because the daily and weekly period_start
+// strings are identical on Mondays — without it, the weekly pass would increment
+// the day's daily rows a second time.
+export function incrementQuestProgress(
+	userId: number,
+	questType: string,
+	questKey: string,
+	amount: number,
+	periodStart: string,
+): void {
 	getDb()
 		.prepare(
 			`UPDATE user_quests SET progress = progress + ?
-			 WHERE user_id = ? AND quest_key = ? AND period_start = ? AND claimed = 0 AND progress < goal`,
+			 WHERE user_id = ? AND quest_type = ? AND quest_key = ? AND period_start = ? AND claimed = 0 AND progress < goal`,
 		)
-		.run(amount, userId, questKey, periodStart);
+		.run(amount, userId, questType, questKey, periodStart);
 }
 
 export function claimQuest(questId: number, userId: number): QuestRow | null {
@@ -430,6 +475,22 @@ export function incrementBonusScore(userId: number, amount: number): void {
 }
 
 // --- Leaderboard queries ---
+
+/**
+ * One account's world rank: how many players out-score them, plus one.
+ *
+ * Deliberately not computeWorldRanks(): that materialises every row and is fine
+ * for a leaderboard page, but this is called on every account-stats push (round
+ * end, login, room switch) and only needs a single aggregate.
+ */
+export function getWorldRank(userId: number): number {
+	const row = getDb()
+		.prepare(
+			"SELECT COUNT(*) AS ahead FROM player_stats WHERE score > (SELECT score FROM player_stats WHERE user_id = ?)",
+		)
+		.get(userId) as { ahead: number } | undefined;
+	return (row?.ahead ?? 0) + 1;
+}
 
 function computeWorldRanks(): Map<number, number> {
 	const rows = getDb()

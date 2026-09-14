@@ -1,9 +1,21 @@
 <script lang="ts">
 	import { st } from "../state.svelte.ts";
+	import { applyVolumeSettings } from "../sound.ts";
 
 	$effect(() => {
 		localStorage.setItem("settings", JSON.stringify(st.settings));
 	});
+
+	// push audio changes into howler as the sliders move
+	$effect(() => {
+		st.settings.muted;
+		st.settings.masterVolume;
+		st.settings.musicVolume;
+		st.settings.sfxVolume;
+		applyVolumeSettings();
+	});
+
+	const pct = (v: number) => `${Math.round(v * 100)}%`;
 </script>
 
 <!-- could be better organized, but this is a start -->
@@ -32,6 +44,27 @@
 	<input bind:checked={st.settings.showNames} type="checkbox">
 	Names
 </label>
+<h2>AUDIO:</h2>
+<label>
+	<input bind:checked={st.settings.muted} type="checkbox">
+	Mute All
+</label>
+<div class="volumeRow">
+	<span>Master</span>
+	<input type="range" min="0" max="1" step="0.05" bind:value={st.settings.masterVolume} disabled={st.settings.muted}>
+	<span class="volumeValue">{pct(st.settings.masterVolume)}</span>
+</div>
+<div class="volumeRow">
+	<span>Music</span>
+	<input type="range" min="0" max="1" step="0.05" bind:value={st.settings.musicVolume} disabled={st.settings.muted}>
+	<span class="volumeValue">{pct(st.settings.musicVolume)}</span>
+</div>
+<div class="volumeRow">
+	<span>Effects</span>
+	<input type="range" min="0" max="1" step="0.05" bind:value={st.settings.sfxVolume} disabled={st.settings.muted}>
+	<span class="volumeValue">{pct(st.settings.sfxVolume)}</span>
+</div>
+
 <h2>OTHER:</h2>
 <label>
 	<input bind:checked={st.settings.showUI} type="checkbox">
@@ -80,5 +113,24 @@
 	}
 	* {
 		color: rgba(0, 0, 0, 0.5);
+	}
+	.volumeRow {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 4px 0;
+		font-size: 13px;
+	}
+	.volumeRow > span:first-child {
+		flex: 0 0 60px;
+	}
+	.volumeRow input[type="range"] {
+		flex: 1;
+		min-width: 0;
+	}
+	.volumeValue {
+		flex: 0 0 38px;
+		text-align: right;
+		font-variant-numeric: tabular-nums;
 	}
 </style>

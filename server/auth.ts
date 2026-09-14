@@ -15,13 +15,43 @@ import {
 	getUserUnlocks,
 	getUnopenedCrateCount,
 	popOldestUnopenedCrate,
+	restoreCrate,
+	findUserByUsernameInsensitive,
+	updateUserProfile,
+	getWorldRank,
 } from "./db.ts";
 import { validateSession } from "./session.ts";
 import { openCrateForUser } from "./unlocks.ts";
-import { getQuestPayload, claimQuestReward, claimStreakRewardForUser } from "./quests.ts";
+import { getQuestPayload, claimQuestReward, claimStreakRewardForUser, recordLogin } from "./quests.ts";
+import { createRateLimiter } from "./security.ts";
+
+// Every account-mutating handler below writes to SQLite. None are emitted often
+// in normal play, so a shared conservative limiter is enough to stop a client
+// hammering the database; keyed per socket.
+const accountWriteLimiter = createRateLimiter(20, 10_000);
+// Claims and crate opens each run a transaction and can grant rewards, so they
+// get a tighter budget of their own.
+const rewardClaimLimiter = createRateLimiter(15, 10_000);
 
 const MAX_CLAN_NAME_LENGTH = 4;
 const MAX_CHAT_URL_LENGTH = 100;
+const MIN_USERNAME_LENGTH = 3;
+// matches the maxlength on the in-game name input
+const MAX_USERNAME_LENGTH = 15;
+const MAX_CHANNEL_LENGTH = 100;
+const USERNAME_RE = /^[A-Za-z0-9_-]+$/;
+
+function validateUsername(name: unknown): string | null {
+	if (typeof name !== "string") return "Invalid username";
+	const trimmed = name.trim();
+	if (trimmed.length < MIN_USERNAME_LENGTH || trimmed.length > MAX_USERNAME_LENGTH) {
+		return `Username must be ${MIN_USERNAME_LENGTH}-${MAX_USERNAME_LENGTH} characters`;
+	}
+	if (!USERNAME_RE.test(trimmed)) {
+		return "Username can only contain letters, numbers, _ and -";
+	}
+	return null;
+}
 
 function validateClanName(name: unknown): string | null {
 	if (typeof name !== "string") return "Invalid clan name";
@@ -51,6 +81,7 @@ export function setupAuthHandlers(socket: AuthenticatedSocket): void {
 	});
 
 	socket.on("claimQuest", (data: { questId?: number }) => {
+		if (!rewardClaimLimiter(socket.id)) return;
 		if (!socket.userId) {
 			socket.emit("questClaimResult", { success: false });
 			return;
@@ -71,6 +102,7 @@ export function setupAuthHandlers(socket: AuthenticatedSocket): void {
 	});
 
 	socket.on("claimStreak", () => {
+		if (!rewardClaimLimiter(socket.id)) return;
 		if (!socket.userId) {
 			socket.emit("streakClaimResult", { success: false });
 			return;
@@ -89,16 +121,49 @@ export function setupAuthHandlers(socket: AuthenticatedSocket): void {
 		socket.username = undefined;
 	});
 
+	// The client listens on "dbChangeUserR" for the result (see app.tsx), which is
+	// why this stub answering on "editUserRes" was invisible in the UI.
 	socket.on("dbEditUser", (data: { userName?: string; userChannel?: string }) => {
+		if (!accountWriteLimiter(socket.id)) return;
 		if (!socket.userId) {
-			socket.emit("editUserRes", "Not logged in", false);
+			socket.emit("dbChangeUserR", "Not logged in", false);
 			return;
 		}
-		// TODO: implement username/channel editing in Phase 3
-		socket.emit("editUserRes", "Profile editing coming soon", false);
+		const current = findUserById(socket.userId);
+		if (!current) {
+			socket.emit("dbChangeUserR", "Account not found", false);
+			return;
+		}
+
+		const requestedName = (data?.userName ?? "").trim() || current.username;
+		const nameError = validateUsername(requestedName);
+		if (nameError) {
+			socket.emit("dbChangeUserR", nameError, false);
+			return;
+		}
+		// case-insensitive so "Bob" can't shadow "bob"; allow keeping your own name
+		const clash = findUserByUsernameInsensitive(requestedName);
+		if (clash && clash.id !== socket.userId) {
+			socket.emit("dbChangeUserR", "That username is taken", false);
+			return;
+		}
+
+		const channel = (data?.userChannel ?? "").trim().substring(0, MAX_CHANNEL_LENGTH);
+		if (!updateUserProfile(socket.userId, requestedName, channel)) {
+			socket.emit("dbChangeUserR", "That username is taken", false);
+			return;
+		}
+
+		// The session cookie's JWT still carries the old name, so attachSocketSession
+		// re-reads the username from the DB on every connect rather than trusting the
+		// claim — this keeps the current socket consistent until then.
+		socket.username = requestedName;
+		socket.emit("dbChangeUserR", requestedName, true);
+		emitAccountStats(socket);
 	});
 
 	socket.on("dbClanCreate", (data: { clanName?: string }) => {
+		if (!accountWriteLimiter(socket.id)) return;
 		if (!socket.userId) {
 			socket.emit("dbClanCreateR", "Not logged in", false);
 			return;
@@ -125,7 +190,11 @@ export function setupAuthHandlers(socket: AuthenticatedSocket): void {
 		emitClanStats(socket);
 	});
 
+	// Joining by name is open by design — the menu advertises "create or join" and
+	// there is no invite/accept data model to gate on. The limiter stops a client
+	// from using it to hammer the DB or enumerate clan names.
 	socket.on("dbClanJoin", (data: { clanKey?: string }) => {
+		if (!accountWriteLimiter(socket.id)) return;
 		if (!socket.userId) {
 			socket.emit("dbClanJoinR", "Not logged in", false);
 			return;
@@ -147,6 +216,7 @@ export function setupAuthHandlers(socket: AuthenticatedSocket): void {
 	// no invite/accept flow exists client-side — an "invite" directly adds the
 	// named user to the owner's clan
 	socket.on("dbClanInvite", (data: { userName?: string }) => {
+		if (!accountWriteLimiter(socket.id)) return;
 		if (!socket.userId) {
 			socket.emit("dbClanInvR", "Not logged in", false);
 			return;
@@ -170,6 +240,7 @@ export function setupAuthHandlers(socket: AuthenticatedSocket): void {
 	});
 
 	socket.on("dbClanKick", (data: { userName?: string }) => {
+		if (!accountWriteLimiter(socket.id)) return;
 		if (!socket.userId) {
 			socket.emit("dbKickInvR", "Not logged in", false);
 			return;
@@ -194,6 +265,7 @@ export function setupAuthHandlers(socket: AuthenticatedSocket): void {
 	});
 
 	socket.on("dbClanChatURL", (data: { chUrl?: string }) => {
+		if (!accountWriteLimiter(socket.id)) return;
 		if (!socket.userId) {
 			socket.emit("dbChatR", { text: "Not logged in" }, false);
 			return;
@@ -209,6 +281,7 @@ export function setupAuthHandlers(socket: AuthenticatedSocket): void {
 	});
 
 	socket.on("dbClanLeave", () => {
+		if (!accountWriteLimiter(socket.id)) return;
 		if (!socket.userId) {
 			socket.emit("dbClanLevR", "Not logged in", false);
 			return;
@@ -228,6 +301,7 @@ export function setupAuthHandlers(socket: AuthenticatedSocket): void {
 	});
 
 	socket.on("openCrate", () => {
+		if (!rewardClaimLimiter(socket.id)) return;
 		if (!socket.userId) {
 			socket.emit("crateResult", { error: "Not logged in" });
 			return;
@@ -238,6 +312,13 @@ export function setupAuthHandlers(socket: AuthenticatedSocket): void {
 			return;
 		}
 		const won = openCrateForUser(socket.userId);
+		if (!won) {
+			// nothing left to win — the account already owns every cosmetic. Put the
+			// crate back rather than consuming it for no reward.
+			restoreCrate(crate.id);
+			socket.emit("crateResult", { error: "You already own every cosmetic" });
+			return;
+		}
 		socket.emit("crateResult", {
 			won,
 			remaining: getUnopenedCrateCount(socket.userId),
@@ -284,8 +365,23 @@ export async function attachSocketSession(socket: AuthenticatedSocket): Promise<
 	const session = await validateSocketSession(socket);
 	if (session) {
 		socket.userId = session.userId;
-		socket.username = session.username;
+		// the JWT's username claim goes stale when a player renames themselves, and
+		// the cookie lives for 7 days — the DB is the source of truth
+		socket.username = findUserById(session.userId)?.username ?? session.username;
 	}
+}
+
+/**
+ * Counts today's login for an authenticated socket. The Discord OAuth callback is
+ * the only other caller of recordLogin, and a returning player with a valid 7-day
+ * session cookie never re-runs OAuth — so without this the streak never advanced.
+ * recordLogin is idempotent per UTC day, so calling it on every connection is safe.
+ * Must run before emitAccountStats so the payload reflects the streak's score/crate.
+ */
+export function recordLoginForSocket(socket: AuthenticatedSocket): void {
+	if (!socket.userId) return;
+	const { justCompletedStreak } = recordLogin(socket.userId);
+	if (justCompletedStreak) socket.emit("streakComplete");
 }
 
 /**
@@ -313,7 +409,8 @@ export function buildAccountPayload(
 		clan: membership?.name ?? "",
 		isClanOwner: membership?.role === "owner",
 		rank: Math.floor(score / 1000),
-		worldRank: 0,
+		// was hardcoded 0 while AccountWidget displayed it
+		worldRank: getWorldRank(userId),
 		rankPercent: (score % 1000) / 10,
 		score,
 		likes: stats.likes,

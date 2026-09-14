@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from "svelte";
 	import { st } from "../state.svelte.ts";
 	import type { CrateWonItem } from "../state.svelte.ts";
 	import {
@@ -15,6 +16,12 @@
 	}
 	const { won, onDone }: Props = $props();
 
+	// RewardPopup wraps this component in {#key st.rewardPopup}, so a new crate
+	// always mounts a fresh CrateReel. The reel is therefore built once from the
+	// prop's initial value and must not react to it mid-spin; untrack says so
+	// explicitly instead of tripping svelte's state_referenced_locally warning.
+	const opened = untrack(() => won);
+
 	const ITEM_WIDTH = 110; // must match .reelItem width + margins in CSS below
 	const REEL_LENGTH = 56;
 	const LAND_INDEX = 48; // leaves a tail of items after the winner so the reel doesn't run out mid-spin
@@ -23,10 +30,10 @@
 	type ReelItem = { type: "hat" | "shirt" | "camo"; id: number; name: string; chance: number };
 
 	const wonItem: ReelItem = {
-		type: won.itemType,
-		id: won.itemId,
-		name: won.itemName,
-		chance: won.chance,
+		type: opened.itemType,
+		id: opened.itemId,
+		name: opened.itemName,
+		chance: opened.chance,
 	};
 
 	function buildPool(): ReelItem[] {
@@ -49,9 +56,9 @@
 	const jitter = randomInt(-Math.floor(ITEM_WIDTH * 0.3), Math.floor(ITEM_WIDTH * 0.3));
 	const landOffset = LAND_INDEX * ITEM_WIDTH + ITEM_WIDTH / 2 + jitter;
 
-	const rarityColor = getItemRarityColor(won.chance);
-	const rarityTier = getItemRarityTier(won.chance);
-	const rarityName = getItemRarityName(won.chance);
+	const rarityColor = getItemRarityColor(opened.chance);
+	const rarityTier = getItemRarityTier(opened.chance);
+	const rarityName = getItemRarityName(opened.chance);
 	// a handful of sparkles for the flashier tiers (epic/legendary)
 	const sparkles = rarityTier >= 3 ? Array.from({ length: rarityTier === 4 ? 10 : 6 }) : [];
 

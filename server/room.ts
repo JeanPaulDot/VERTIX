@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+import { Buffer } from "node:buffer";
 import type { Server, Socket } from "socket.io";
 import { gameModes } from "core/src/gamemodes.ts";
 import { characterClasses } from "core/src/loadouts.ts";
@@ -24,6 +26,7 @@ import {
 	randomBotName,
 } from "./bots.ts";
 import { Game } from "./game.ts";
+import { log, formatDuration } from "./log.ts";
 import {
 	sanitizeName,
 	isValidClassIndex,
@@ -55,6 +58,7 @@ import {
 	buildAccountPayload,
 	emitAccountStats,
 	emitUnlocks,
+	recordLoginForSocket,
 	setupAuthHandlers,
 	type AuthenticatedSocket,
 } from "./auth.ts";
@@ -67,6 +71,24 @@ const chatRateLimiter = createRateLimiter(5, 1000);
 const angleRateLimiter = createIntervalLimiter(4);
 const movementRateLimiter = createIntervalLimiter(4);
 const shootRateLimiter = createIntervalLimiter(50);
+// resync requests are rare in normal play (one per missed "add"), so a low cap is
+// plenty and stops a client using it to dump the roster in a loop
+const resyncRateLimiter = createRateLimiter(20, 1000);
+// Handlers that write to the DB, allocate a timer, or fan a message out to the
+// whole room. None of these are emitted rapidly in normal play, but every one
+// of them was an unmetered amplification primitive.
+const likeRateLimiter = createRateLimiter(10, 10_000);
+const cosmeticRateLimiter = createRateLimiter(20, 5_000);
+const reloadRateLimiter = createIntervalLimiter(100);
+const weaponSwapRateLimiter = createIntervalLimiter(50);
+const sprayRateLimiter = createIntervalLimiter(1000);
+const respawnRateLimiter = createIntervalLimiter(250);
+const modeVoteRateLimiter = createIntervalLimiter(250);
+// A burst budget, not a minimum interval: joining fires two "gotit"s back to
+// back (connect -> welcome -> gotit, then respawn -> welcome -> gotit), so a
+// min-interval throttle here silently dropped the second one and left the client
+// stuck on CONNECTING forever.
+const joinRateLimiter = createRateLimiter(6, 5000);
 
 const EXPLOSIVE_CLUTTER_HIT_DAMAGE = 100;
 const EXPLOSIVE_CLUTTER_BLAST_RADIUS = 200;
@@ -74,6 +96,12 @@ const DUCK_HIT_DAMAGE = 330; // ?
 const DUCK_HIT_RADIUS = 240; // ?
 
 const SPAWN_PROTECTION_DURATION = 2000;
+
+// Shots are timestamped server-side, so network jitter can make two legitimate
+// shots land closer together than the weapon's nominal fireRate. Allow a small
+// margin rather than dropping real shots; it still caps a modified client to
+// roughly the weapon's advertised rate instead of the flat 50ms socket throttle.
+const FIRE_RATE_TOLERANCE = 0.85;
 
 const LOOTCRATE_POINTS = 100;
 const MAX_ACTIVE_LOOT = 3;
@@ -90,8 +118,48 @@ const MAX_BOTS_PER_ROOM = 4;
 // bots' bullets step at this delta (real clients send ~16ms frame deltas);
 // using the 100ms brain tick here would make projectiles tunnel through walls
 const BOT_PROJECTILE_STEP_MS = 16;
+// defence in depth alongside clampMovementInput's MIN_MOVEMENT_DELTA: never let a
+// bullet's self-rescheduling tick degenerate into a 0ms loop
+const MIN_BULLET_STEP_MS = 8;
+
+// Hard ceiling on how long a projectile may live, whatever its weapon or the
+// client claimed. The slowest legitimate shot crosses the largest map well
+// inside this.
+const MAX_BULLET_LIFETIME_MS = 10_000;
+
+// Bounds for the client-supplied shoot parameters. The largest map is 64 tiles
+// a side; these are deliberately generous, they only need to stop absurd values
+// from reaching the physics and timer code.
+const MAX_WORLD_COORD = 1_000_000;
+const MAX_JUMP_Y = 2_000;
+const MAX_ANGLE_RADIANS = Math.PI * 4;
+const MAX_SHOOT_TARGET_DISTANCE = 20_000;
+
+// How much unused movement time a player may bank. Covers a dropped packet or a
+// GC pause without letting a flooding client accumulate a meaningful head start.
+const MOVEMENT_BUDGET_BURST_MS = 250;
+
+// Ceiling on a single bot movement step, so a stalled event loop can't teleport
+// every bot in the room on the next tick.
+const MAX_BOT_STEP_MS = 50;
+
+// Positions go out on a fixed room tick rather than once per received input.
+// A 240Hz client used to make the server rebuild and send the whole roster 240
+// times a second for itself alone; now the send rate is the server's to choose.
+const POSITION_TICK_MS = 16;
 
 export const rooms: Room[] = [];
+
+/**
+ * Constant-time host-secret comparison. Both values are hex strings of a known
+ * length, so a length mismatch is safe to short-circuit on.
+ */
+function secretMatches(supplied: unknown, expected: string): boolean {
+	if (typeof supplied !== "string" || supplied.length !== expected.length) return false;
+	return timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+}
+
+type WeaponRuntime = { ammo: number; lastShot: number; reloadUntil: number };
 
 export class Room {
 	name;
@@ -102,12 +170,30 @@ export class Room {
 	hostSecret: string | null = null;
 	private emptySince: number | null = Date.now();
 	private bots = new Map<Player, BotState>();
-	private botInterval: ReturnType<typeof setInterval> | null = null;
+	private lastBotStepAt = 0;
+	// per-player wall-clock movement allowance; see consumeMovementBudget
+	private movementBudget = new WeakMap<
+		Player,
+		{ lastAt: number; budget: number; warnedAt: number }
+	>();
+	// every interval this room owns, so close() can tear all of them down. Leaving
+	// any of them running pins the whole Room (game, tiles, bullet pool) in memory
+	// and lets the empty-check re-close an already-closed room every 5s forever.
+	private intervals: ReturnType<typeof setInterval>[] = [];
+	private isClosed = false;
 	cosmetics = {
 		hats,
 		shirts,
 		camos,
 	};
+	// Per-player, per-slot ammo/fire-rate state. It can't live on the weapon objects
+	// because game.weapons is one structuredClone shared by everyone in the room, and
+	// it's deliberately kept off Player so it never ships in the "add"/"gameSetup"
+	// payloads. WeakMap so departed players don't need explicit cleanup.
+	private weaponRuntime = new WeakMap<Player, WeaponRuntime[]>();
+	// players whose round has already been written to the DB this round, so a
+	// disconnect right before the round-end pass can't double-count them
+	private persistedThisRound = new WeakSet<Player>();
 	// in-memory per-user round stats for real-time quest progress tracking
 	roundQuestStats = new Map<number, { kills: number; deaths: number; damage: number; healing: number; goals: number; score: number; won: boolean }>();
 	constructor(io: Server, name: string) {
@@ -117,7 +203,23 @@ export class Room {
 		this.sortCosmetics();
 		this.startCheckLootInterval();
 		this.startCheckEmptyInterval();
-		this.botInterval = setInterval(() => this.tickBots(), BOT_TICK_MS);
+		this.intervals.push(setInterval(() => this.tickBots(), BOT_TICK_MS));
+		this.intervals.push(
+			setInterval(() => {
+				this.stepBotMovement();
+				this.broadcastPositions();
+			}, POSITION_TICK_MS),
+		);
+	}
+
+	/** "2/8" style occupancy, humans only — bots yield their slot to real players. */
+	occupancy() {
+		return `${this.humanCount()}/${this.game.maxPlayers}`;
+	}
+
+	/** Short room descriptor for logs: "DEV0 ffa 2/8". */
+	describe() {
+		return `${this.name} ${this.game.mode.code} ${this.occupancy()}`;
 	}
 
 	/** Returns false if a custom map was supplied but rejected (falls back to the default map). */
@@ -135,17 +237,18 @@ export class Room {
 		this.game.mults.speed = Math.max(0.01, Math.min(100, data.srvSpeedMult ?? 1));
 		this.password = data.srvPass ? data.srvPass : "";
 
+		// `indx` must be the index into the global gameModes array, not the position
+		// within the filtered list: newRound(sorted[0].indx) at round end indexes
+		// gameModes directly, so a filtered-position indx rotates into the wrong mode
+		const requestedModes = (data.srvModes ?? []).filter(
+			(i) => Number.isInteger(i) && i >= 0 && i < gameModes.length,
+		);
 		let modeIndex = 0;
-		if (data.srvModes && data.srvModes.length > 0) {
-			const modes = data.srvModes;
+		if (requestedModes.length > 0) {
 			this.game.modeVotes = gameModes
-				.filter((m, i) => modes.includes(i))
-				.map((m, i) => ({
-					name: m.name,
-					indx: i,
-					votes: 0,
-				}));
-			modeIndex = modes[0];
+				.map((m, i) => ({ name: m.name, indx: i, votes: 0 }))
+				.filter((v) => requestedModes.includes(v.indx));
+			modeIndex = requestedModes[0];
 		} else {
 			this.game.modeVotes = gameModes.map((m, i) => ({
 				name: m.name,
@@ -161,10 +264,11 @@ export class Room {
 	}
 
 	close() {
-		if (this.botInterval) {
-			clearInterval(this.botInterval);
-			this.botInterval = null;
-		}
+		if (this.isClosed) return;
+		this.isClosed = true;
+		log.info("room", `${this.name} closed (${this.isPermanent ? "permanent" : "private"})`);
+		for (const interval of this.intervals) clearInterval(interval);
+		this.intervals = [];
 		this.io.disconnectSockets(true);
 		this.io.removeAllListeners();
 		(this.io.server as any)._nsps.delete(this.name);
@@ -173,7 +277,7 @@ export class Room {
 	}
 
 	startCheckEmptyInterval() {
-		setInterval(() => {
+		this.intervals.push(setInterval(() => {
 			if (this.isPermanent || this.game.players.length > 0) {
 				this.emptySince = null;
 				return;
@@ -185,7 +289,7 @@ export class Room {
 			if (Date.now() - this.emptySince >= AUTO_CLOSE_EMPTY_MS) {
 				this.close();
 			}
-		}, CHECK_EMPTY_INTERVAL_MS);
+		}, CHECK_EMPTY_INTERVAL_MS));
 	}
 
 	handleSocket() {
@@ -216,15 +320,24 @@ export class Room {
 			const authSocket = socket as AuthenticatedSocket;
 			await attachSocketSession(authSocket);
 			setupAuthHandlers(authSocket);
+			recordLoginForSocket(authSocket);
 			emitAccountStats(authSocket);
 			let player = this.game.newPlayer();
 			player.socketId = socket.id;
 			let hasLoggedJoin = false;
+			let joinedAt = 0;
 			if (authSocket.userId) {
 				const membership = findUserClanMembership(authSocket.userId);
 				if (membership) player.account.clan = membership.name;
+				// these ride along in the "add" broadcast, which is what lets *other*
+				// clients draw this player's rank badge and open their profile from the
+				// scoreboard — both were dead because nothing ever set them
+				player.loggedIn = true;
+				player.account.rank = Math.floor((getUserStats(authSocket.userId)?.score ?? 0) / 1000);
 			}
-			socket.emit("yourRoom", `${this.name}`);
+			// second arg: whether this room's rounds count toward stats/quests. Only
+			// permanent rooms do (see persistPlayerRound), and the menu says so.
+			socket.emit("yourRoom", `${this.name}`, this.isPermanent);
 			socket.emit(
 				"welcome",
 				{
@@ -245,6 +358,7 @@ export class Room {
 			emitUnlocks(authSocket);
 
 			socket.on("cHat", (id) => {
+				if (!cosmeticRateLimiter(socket.id)) return;
 				// guests have no account to persist unlocks against, so they keep
 				// today's free-selection behavior; logged-in players must own the item
 				if (isValidHatIndex(id) && (!authSocket.userId || hasUnlock(authSocket.userId, "hat", id))) {
@@ -252,11 +366,14 @@ export class Room {
 				}
 			});
 			socket.on("cShirt", (id) => {
+				if (!cosmeticRateLimiter(socket.id)) return;
 				if (isValidShirtIndex(id) && (!authSocket.userId || hasUnlock(authSocket.userId, "shirt", id))) {
 					player.account.shirt = shirts[id - 1];
 				}
 			});
 			socket.on("cCamo", (data) => {
+				if (!cosmeticRateLimiter(socket.id)) return;
+				if (!data || typeof data !== "object") return;
 				const wep = this.game.weapons[data.weaponID];
 				if (!wep || !isValidCamoIndex(data.camoID)) return;
 				// camoID 0 means "no camo" (client default) — always allowed, no ownership needed
@@ -269,6 +386,7 @@ export class Room {
 				}
 			});
 			socket.on("cSpray", (id) => {
+				if (!cosmeticRateLimiter(socket.id)) return;
 				const spray = sprays.find((s) => s.id === id);
 				if (spray) {
 					player.spray = {
@@ -279,6 +397,10 @@ export class Room {
 			});
 
 			socket.on("gotit", (client, init, currentTime) => {
+				// each call ends in a full gameSetup JSON.stringify (whole map + roster)
+				// broadcast to the room, so it needs a floor between calls
+				if (!joinRateLimiter(socket.id)) return;
+				if (!client || typeof client !== "object") return;
 				player.name = client.name ? sanitizeName(client.name) : player.name;
 				if (isValidClassIndex(client.classIndex)) {
 					player.classIndex = client.classIndex;
@@ -289,9 +411,9 @@ export class Room {
 				// the non-init "gotit" path also runs on every respawn — only log the first spawn
 				if (!hasLoggedJoin) {
 					hasLoggedJoin = true;
-					console.log(
-						`[join] ${player.name} joined ${this.name}${authSocket.userId ? "" : " (guest)"}`,
-					);
+					joinedAt = Date.now();
+					const who = authSocket.username ? `${player.name}` : `${player.name} (guest)`;
+					log.info("join", `${who} -> ${this.describe()} ${this.isPermanent ? "" : "[private]"}`.trim());
 				}
 
 				player.onScreen = true;
@@ -347,6 +469,7 @@ export class Room {
 				}
 			});
 			socket.on("respawn", () => {
+				if (!respawnRateLimiter(socket.id)) return;
 				socket.emit(
 					"welcome",
 					{
@@ -359,21 +482,40 @@ export class Room {
 				);
 			});
 			socket.on("disconnect", () => {
+				// bank the round before dropping them, otherwise leaving mid-round
+				// throws away every point, kill and quest tick they earned
+				this.persistPlayerRound(player, false);
+				if (hasLoggedJoin) {
+					const played = formatDuration(Date.now() - joinedAt);
+					log.info(
+						"left",
+						`${player.name} <- ${this.name} after ${played} (${player.kills}k/${player.deaths}d, ${player.score} pts)`,
+					);
+				}
 				this.io.emit("rem", player.index);
 				this.game.players.splice(this.game.players.indexOf(player), 1);
 				if (this.game.players.length === 0) {
 					this.emptySince = Date.now();
 				}
-				this.updateScore(0, player);
+				// only refresh the board — running updateScore here re-evaluated the
+				// win condition against the *departing* player's score and could end
+				// the round in their name after they'd already left
+				this.broadcastLeaderboard();
 			});
 			socket.on("sw", (currentWeapon) => {
+				if (!weaponSwapRateLimiter(socket.id)) return;
 				player.currentWeapon = clampNumber(currentWeapon, 0, player.weapons.length - 1);
 				this.io.emit("upd", { i: player.index, wi: player.currentWeapon });
 			});
 			socket.on("r", () => {
+				// each call schedules a setTimeout; unmetered, spamming reload was a
+				// timer flood
+				if (!reloadRateLimiter(socket.id)) return;
 				const currentWeapon = getCurrentWeapon(player);
+				if (!currentWeapon) return;
 				currentWeapon.spreadIndex = 0;
 				const currentWeaponIndex = player.currentWeapon;
+				this.startReload(player, currentWeaponIndex);
 				setTimeout(() => {
 					socket.emit("r", currentWeaponIndex);
 				}, currentWeapon.reloadSpeed ?? 0);
@@ -382,13 +524,15 @@ export class Room {
 				if (!angleRateLimiter(socket.id)) return;
 				this.applyAngleInput(player, targetF);
 			});
-			socket.on("1", (x, y, jumpY, targetF, targetD, currentTime) => {
+			socket.on("1", (x, y, jumpY, targetF, targetD) => {
 				if (!shootRateLimiter(socket.id)) return;
-				this.applyShootInput(player, x, y, jumpY, targetF, targetD, currentTime);
+				// the client's clock is never trusted: it fed bullet.startTime, so a
+				// far-future value made the projectile's expiry check never fire
+				this.applyShootInput(player, x, y, jumpY, targetF, targetD, Date.now());
 			});
 			socket.on("4", (data) => {
 				if (!movementRateLimiter(socket.id)) return;
-				this.applyMovementInput(player, data, socket);
+				this.applyMovementInput(player, data);
 			});
 			socket.on("cht", (msg, type) => {
 				if (!chatRateLimiter(socket.id)) return;
@@ -407,8 +551,9 @@ export class Room {
 					socket.emit("cht", [-1, "synced"]);
 					return;
 				}
-				console.log(
-					`[chat] [${this.name}]${type === "TEAM" ? " (team)" : ""} ${player.name}: ${msg}`,
+				log.info(
+					"chat",
+					`${this.name}${type === "TEAM" ? " (team)" : ""} ${player.name}: ${msg}`,
 				);
 				if (type === "TEAM" && this.game.mode.teams) {
 					for (let pl of this.game.players) {
@@ -423,10 +568,17 @@ export class Room {
 				}
 			});
 			socket.on("modeVote", (i) => {
+				if (!modeVoteRateLimiter(socket.id)) return;
 				if (!isValidModeVoteIndex(i, this.game.modeVotes)) return;
 				let vote = this.game.modeVotes[i];
-				if (player.lastModeVote !== undefined) {
-					let lastVote = this.game.modeVotes[player.lastModeVote];
+				// lastModeVote indexes the modeVotes array as it was when the vote was
+				// cast; configure() rebuilds that array and can make it shorter, so a
+				// stale index used to dereference undefined here
+				const lastVote =
+					player.lastModeVote !== undefined
+						? this.game.modeVotes[player.lastModeVote]
+						: undefined;
+				if (player.lastModeVote !== undefined && lastVote) {
 					lastVote.votes -= 1;
 					this.io.emit("vt", {
 						i: player.lastModeVote,
@@ -444,7 +596,12 @@ export class Room {
 				});
 			});
 			socket.on("like", (sourceIndex: number, destIndex: number) => {
+				// unmetered, this wrote to SQLite on every emit; and nothing stopped a
+				// player liking themselves, which the per-round likedBy reset made
+				// re-earnable every single round
+				if (!likeRateLimiter(socket.id)) return;
 				if (sourceIndex !== player.index) return;
+				if (destIndex === player.index) return;
 				const likedPlayer = this.game.players.find(
 					(pl) => pl.index === destIndex,
 				);
@@ -468,7 +625,14 @@ export class Room {
 				socket.emit("pong1");
 			});
 			socket.on("cSrv", (data) => {
-				if (data.hostSecret !== this.hostSecret) return;
+				// The permanent DEV rooms never get a hostSecret, so it stays null —
+				// and `null !== null` is false, which let ANY client reconfigure the
+				// public rooms: password-lock them, set 100x health, force the mode,
+				// or loop newRound() to restart the match forever. Reject outright
+				// when this room has no host, and guard `data` (an empty emit threw).
+				if (!this.hostSecret) return;
+				if (!data || typeof data !== "object") return;
+				if (!secretMatches(data.hostSecret, this.hostSecret)) return;
 				const mapAccepted = this.configure(data);
 				const message = mapAccepted
 					? this.name
@@ -476,11 +640,12 @@ export class Room {
 				socket.emit("cSrvRes", message, true);
 			});
 			socket.on("closeRoom", (secret: string) => {
-				if (secret && secret === this.hostSecret) {
+				if (this.hostSecret && secretMatches(secret, this.hostSecret)) {
 					this.close();
 				}
 			});
 			socket.on("crtSpr", () => {
+				if (!sprayRateLimiter(socket.id)) return;
 				let weaponYOffset = 55;
 				let muzzleDistance = 50;
 
@@ -502,6 +667,19 @@ export class Room {
 				);
 				this.io.emit("crtSpr", player.index, muzzleEndX, muzzleEndY);
 			});
+			// The client emits this when it receives an update for a player it doesn't
+			// know about, i.e. it missed an "add". Nothing answered it before, so that
+			// player stayed invisible for the rest of the round.
+			socket.on("ftc", (index: unknown) => {
+				if (!resyncRateLimiter(socket.id)) return;
+				if (typeof index !== "number" || !Number.isInteger(index)) return;
+				const missing = this.game.players.find((pl) => pl.index === index);
+				// socketId is server bookkeeping; peers have no use for it
+				if (missing) {
+					const { socketId: _socketId, ...safe } = missing as Player & { socketId?: string };
+					socket.emit("add", JSON.stringify(safe));
+				}
+			});
 			socket.on("create", (lobby) => {});
 		});
 	}
@@ -511,7 +689,9 @@ export class Room {
 	// run the exact same movement/physics/shooting code as real players)
 
 	private applyAngleInput(player: Player, targetF: number) {
-		player.targetF = targetF;
+		// unvalidated, a NaN or a string here propagated into player.angle and the
+		// crtSpr muzzle math, and was then broadcast to every client in the room
+		player.targetF = clampNumber(targetF, -MAX_ANGLE_RADIANS, MAX_ANGLE_RADIANS);
 	}
 
 	private applyShootInput(
@@ -523,18 +703,36 @@ export class Room {
 		targetD: number,
 		currentTime: number,
 	) {
+		// the dead and the spawn-protected can't shoot — the client enforces both in
+		// shootBullet(), so only a modified client ever reaches here having ignored them
+		if (player.dead || player.isSpawnProtected) return;
 		const currentWeapon = getCurrentWeapon(player);
 		if (!currentWeapon) return;
+		// Everything below this point is client-supplied. targetD sets
+		// bullet.maxLifeTime for the two distBased weapons (both explosive), so an
+		// unbounded value produced an immortal projectile whose self-rescheduling
+		// setTimeout chain in updateBullet never terminated — one leaked timer loop
+		// per shot. jumpY and targetF were likewise unchecked, and a NaN in either
+		// poisons player.angle and the muzzle math broadcast to the whole room.
+		x = clampNumber(x, -MAX_WORLD_COORD, MAX_WORLD_COORD);
+		y = clampNumber(y, -MAX_WORLD_COORD, MAX_WORLD_COORD);
+		jumpY = clampNumber(jumpY, 0, MAX_JUMP_Y);
+		targetF = clampNumber(targetF, -MAX_ANGLE_RADIANS, MAX_ANGLE_RADIANS);
+		targetD = clampNumber(targetD, 0, MAX_SHOOT_TARGET_DISTANCE);
 		// anti-cheat position check; trivially passes for bots since their
 		// "claimed" position is whatever the brain just moved them to.
 		// reject the shot outright rather than silently reusing the server
 		// position, so a spoofed position can't still land a shot.
 		if (!isWithinShootDistance(x, y, player.x, player.y)) {
-			console.warn(
-				`[anti-cheat] rejected shot from player ${player.index} (${player.name}): claimed (${x}, ${y}) vs server (${player.x}, ${player.y})`,
+			log.warn(
+				"anticheat",
+				`${this.name} rejected shot from ${player.name}: claimed (${x}, ${y}) vs server (${player.x}, ${player.y})`,
 			);
 			return;
 		}
+		// server-authoritative fire rate + ammo (the client also enforces both, but
+		// nothing stopped a modified client from full-autoing a sniper before this)
+		if (!this.consumeShot(player, currentWeapon)) return;
 		for (let i = 0; i < currentWeapon.bulletsPerShot; i++) {
 			currentWeapon.spreadIndex++;
 			if (currentWeapon.spreadIndex >= currentWeapon.spread.length) {
@@ -561,10 +759,93 @@ export class Room {
 		}
 	}
 
+	/** Fresh ammo/fire-rate state for a player's current loadout. */
+	private resetWeaponRuntime(player: Player) {
+		this.weaponRuntime.set(
+			player,
+			player.weapons.map((w) => ({ ammo: w.maxAmmo, lastShot: 0, reloadUntil: 0 })),
+		);
+	}
+
+	/**
+	 * Charges one shot against the player's current weapon slot, returning false
+	 * (and firing nothing) when the shot is too early, mid-reload, or out of ammo.
+	 * Emptying the magazine auto-schedules a reload, mirroring what the client does
+	 * in shootBullet() — otherwise a client that never sends "r" would soft-lock.
+	 */
+	private consumeShot(player: Player, weapon: Player["weapons"][number]): boolean {
+		let runtime = this.weaponRuntime.get(player);
+		if (!runtime || runtime.length !== player.weapons.length) {
+			this.resetWeaponRuntime(player);
+			runtime = this.weaponRuntime.get(player);
+		}
+		const slot = runtime?.[player.currentWeapon];
+		if (!slot) return true;
+
+		const now = Date.now();
+		if (now < slot.reloadUntil) return false;
+		if (slot.ammo <= 0) return false;
+		if (now - slot.lastShot < weapon.fireRate * FIRE_RATE_TOLERANCE) return false;
+
+		slot.lastShot = now;
+		slot.ammo--;
+		if (slot.ammo <= 0) this.startReload(player, player.currentWeapon);
+		return true;
+	}
+
+	/** Begins a reload of one weapon slot; refills the magazine when it completes. */
+	private startReload(player: Player, slotIndex: number) {
+		const weapon = player.weapons[slotIndex];
+		const slot = this.weaponRuntime.get(player)?.[slotIndex];
+		if (!weapon || !slot) return;
+		const reloadSpeed = weapon.reloadSpeed ?? 0;
+		const now = Date.now();
+		if (now < slot.reloadUntil) return; // already reloading
+		slot.reloadUntil = now + reloadSpeed;
+		setTimeout(() => {
+			// the slot object is replaced wholesale on class change, so a stale timer
+			// from a previous loadout refills an object nothing reads any more
+			slot.ammo = weapon.maxAmmo;
+			slot.reloadUntil = 0;
+		}, reloadSpeed);
+	}
+
+	/**
+	 * Grants a player up to `requested` ms of simulated movement, drawn from a
+	 * budget that refills at wall-clock rate. MOVEMENT_BUDGET_BURST_MS of slack
+	 * absorbs normal network jitter and frame hitches — a laggy player who goes
+	 * quiet for 200ms still gets that time back on their next packet — but a
+	 * client flooding inputs simply drains the budget and stops moving.
+	 */
+	private consumeMovementBudget(player: Player, requested: number): number {
+		const now = Date.now();
+		const state = this.movementBudget.get(player);
+		if (!state) {
+			this.movementBudget.set(player, { lastAt: now, budget: 0, warnedAt: 0 });
+			return requested;
+		}
+		state.budget = Math.min(
+			MOVEMENT_BUDGET_BURST_MS,
+			state.budget + (now - state.lastAt),
+		);
+		state.lastAt = now;
+		const granted = Math.min(requested, state.budget);
+		state.budget -= granted;
+		// only a modified client can outrun the budget by a wide margin; log it at
+		// most once a minute per player so it stays readable
+		if (granted < requested / 2 && !player.isBot && now - state.warnedAt > 60_000) {
+			state.warnedAt = now;
+			log.warn(
+				"anticheat",
+				`${this.name} throttled movement from ${player.name}: asked ${requested}ms, granted ${Math.round(granted)}ms`,
+			);
+		}
+		return granted;
+	}
+
 	private applyMovementInput(
 		player: Player,
 		data: { hdt: unknown; vdt: unknown; delta: unknown; s: unknown; isn: unknown },
-		socket?: Socket,
 	) {
 		const inputNumber = data.isn;
 
@@ -573,8 +854,13 @@ export class Room {
 			let horizontalDT = clamped.hdt;
 			let verticalDT = clamped.vdt;
 			const space = clamped.s;
-			player.delta = clamped.delta;
-			const delta = clamped.delta;
+			// Clamping each packet's delta to 8-100ms is not enough on its own: the
+			// movement throttle allows a packet every 4ms, so 250 packets/second each
+			// claiming 100ms bought 25 seconds of simulated movement per real second.
+			// Draw the delta from a wall-clock budget instead, so total simulated time
+			// can never outrun elapsed time regardless of packet rate.
+			const delta = this.consumeMovementBudget(player, clamped.delta);
+			player.delta = Math.max(MIN_BULLET_STEP_MS, delta);
 			const lengthDT = Math.sqrt(
 				horizontalDT * horizontalDT + verticalDT * verticalDT,
 			);
@@ -624,25 +910,47 @@ export class Room {
 				}
 				player.jumpY = Math.round(player.jumpY);
 			}
-			wallCol(player, this.game.tiles, this.game.clutter);
+			wallCol(player, this.game.mapData, this.game.clutter);
 			this.checkSpecialTiles(player);
 			player.x = Math.round(player.x);
 			player.y = Math.round(player.y);
 		}
 
-		// position echo: clients receive everyone's positions in response to
-		// their own movement packets; bots have no socket and don't need it
-		socket?.emit(
-			"rsd",
-			this.game.players.flatMap((pl) => [
-				6,
-				pl.index,
-				pl.x,
-				pl.y,
-				pl.angle,
-				pl.index === player.index ? inputNumber : pl.nameYOffset,
-			]),
-		);
+		// Record the input this player has now been simulated up to. It rides back
+		// out on the next position tick (see broadcastPositions) and is what the
+		// client's reconciliation uses to drop inputs the server has already applied.
+		player.isn = clampNumber(inputNumber, 0, 2_147_483_647);
+	}
+
+	/**
+	 * Sends every player their view of the roster: [6, index, x, y, angle, extra],
+	 * where `extra` is the recipient's own last-applied input number in their own
+	 * slot and each other player's nameYOffset elsewhere.
+	 *
+	 * The roster is built once per tick and sliced per socket. It used to be
+	 * rebuilt with a flatMap for every movement packet received, i.e. players x
+	 * client-framerate times a second per room.
+	 */
+	private broadcastPositions() {
+		const players = this.game.players;
+		if (players.length === 0) return;
+		const base: number[] = [];
+		const isnSlot = new Map<Player, number>();
+		for (const pl of players) {
+			isnSlot.set(pl, base.length + 6);
+			// Slot 5 used to carry nameYOffset, which is permanently 0 here — it's a
+			// client-side value computed against the local tile grid, so sending it
+			// only overwrote the client's own correct figure with 0. jumpY is what
+			// remotes actually need and never had: without it a remote player's jump
+			// was invisible to everyone else.
+			base.push(7, pl.index, pl.x, pl.y, pl.angle, pl.jumpY, 0);
+		}
+		for (const pl of players) {
+			if (!pl.socketId) continue; // bots have no socket
+			const view = base.slice();
+			view[isnSlot.get(pl)!] = pl.isn ?? 0;
+			this.io.to(pl.socketId).emit("rsd", view);
+		}
 	}
 
 	/** Applies gamemode class overrides + class stats/weapons (shared by "gotit" and bot spawns). */
@@ -669,6 +977,7 @@ export class Room {
 		player.speed = currentClass.speed * this.game.mults.speed;
 		player.jumpStrength = currentClass.jumpStrength;
 		player.gravityStrength = currentClass.gravityStrength;
+		this.resetWeaponRuntime(player);
 	}
 
 	// --- AI bots ---
@@ -694,7 +1003,8 @@ export class Room {
 		const difficulty = randomBotDifficulty();
 		this.bots.set(bot, createBotState(difficulty));
 		this.spawnBotPlayer(bot);
-		console.log(`[bot] ${bot.name} (${difficulty.name}) joined ${this.name}`);
+		// debug: 9 permanent rooms topping up bots would flood the log at info level
+		log.debug("bot", `${bot.name} (${difficulty.name}) joined ${this.name}`);
 	}
 
 	/** (Re)spawns a bot into the current round — mirror of the non-init "gotit" path. */
@@ -723,6 +1033,48 @@ export class Room {
 		const idx = this.game.players.indexOf(bot);
 		if (idx > -1) this.game.players.splice(idx, 1);
 		this.io.emit("rem", bot.index);
+	}
+
+	/**
+	 * Integrates each bot's current movement intent by one position tick. Called
+	 * immediately before broadcastPositions so every snapshot carries genuinely
+	 * fresh positions.
+	 */
+	private stepBotMovement() {
+		if (this.game.roundEnd) return;
+		const now = Date.now();
+		const delta = Math.min(
+			MAX_BOT_STEP_MS,
+			this.lastBotStepAt === 0 ? POSITION_TICK_MS : now - this.lastBotStepAt,
+		);
+		this.lastBotStepAt = now;
+		if (delta <= 0) return;
+		for (const [bot, state] of this.bots) {
+			if (bot.dead) continue;
+			// a stationary bot still needs stepping while airborne, or its jump arc
+			// freezes mid-flight
+			if (
+				state.moveX === 0 &&
+				state.moveY === 0 &&
+				state.jump === 0 &&
+				bot.jumpY === 0 &&
+				bot.jumpCountdown <= 0
+			) {
+				continue;
+			}
+			this.applyMovementInput(bot, {
+				hdt: state.moveX,
+				vdt: state.moveY,
+				s: state.jump,
+				isn: 0,
+				delta,
+			});
+			// a jump is an edge, not a held state — consume it so it doesn't retrigger
+			// on every one of the next six ticks
+			state.jump = 0;
+			// after movement, force a fine projectile step for this bot's bullets
+			bot.delta = BOT_PROJECTILE_STEP_MS;
+		}
 	}
 
 	private tickBots() {
@@ -847,34 +1199,113 @@ export class Room {
 		state.lastX = bot.x;
 		state.lastY = bot.y;
 
-		const jump = Math.random() < state.difficulty.strafeChance * 0.06 ? 1 : 0;
-		this.applyMovementInput(bot, {
-			hdt,
-			vdt,
-			s: jump,
-			isn: 0,
-			delta: BOT_TICK_MS,
-		});
-		// after movement, force a fine projectile step for this bot's bullets
-		bot.delta = BOT_PROJECTILE_STEP_MS;
+		// Record the intent; stepBotMovement integrates it on the position tick.
+		// Applying a full BOT_TICK_MS of movement here made bots jump 100ms of
+		// travel once every six broadcasts, which is what made them look like they
+		// were teleporting, and left five of every six snapshots reporting zero
+		// movement — which in turn kept resetting their walk animation to idle.
+		state.moveX = hdt;
+		state.moveY = vdt;
+		if (Math.random() < state.difficulty.strafeChance * 0.06) state.jump = 1;
 
 		// fire control
 		const weapon = getCurrentWeapon(bot);
 		if (!weapon) return;
-		if (now < state.reloadUntil) return;
 		if (now - state.targetAcquiredAt < state.difficulty.reactionDelayMs) return;
 		if (dist > BOT_MAX_FIRE_RANGE) return;
+		// fireDiscipline only paces the bot *below* the weapon's cap; ammo and the
+		// cap itself are enforced by applyShootInput, the same as for real players
+		// (the bot used to simulate its own magazine, which would now double up)
 		const effectiveRate = Math.max(weapon.fireRate, 200) / state.difficulty.fireDiscipline;
 		if (now - state.lastShotAt < effectiveRate) return;
 		state.lastShotAt = now;
+		// bullets step on the bot's own delta; keep it fine regardless of whether
+		// stepBotMovement ran for this bot on the last tick
+		bot.delta = BOT_PROJECTILE_STEP_MS;
 		this.applyShootInput(bot, bot.x, bot.y, bot.jumpY, aimF, dist, now);
-		state.shotsSinceReload++;
-		// simulated reload pause so bots don't fire forever (server doesn't
-		// track ammo — real clients enforce it locally via the "r" event)
-		if (state.shotsSinceReload >= Math.max(1, weapon.maxAmmo)) {
-			state.shotsSinceReload = 0;
-			state.reloadUntil = now + (weapon.reloadSpeed ?? 800);
+	}
+
+	/**
+	 * Writes one player's round into the DB: lifetime stats, quest progress, score
+	 * unlocks and rank-up crates, then pushes the refreshed account payload.
+	 *
+	 * Called at round end for everyone still connected, and from the disconnect
+	 * handler for anyone who leaves early — previously, leaving before the round
+	 * ended silently discarded all of that round's score, kills and quest progress.
+	 *
+	 * Private rooms are skipped: the create-room form promises "Statistics will not
+	 * be affected by games played in private rooms", and counting them would let
+	 * anyone farm score and crates in a room with an alt account.
+	 */
+	private persistPlayerRound(pl: Player, won: boolean) {
+		if (!this.isPermanent) return;
+		if (this.persistedThisRound.has(pl)) return;
+		// this.io is a Namespace: `.sockets` is already the id->socket Map
+		const authSocket = pl.socketId ? this.io.sockets.get(pl.socketId) : null;
+		const userId = (authSocket as AuthenticatedSocket | null | undefined)?.userId;
+		if (!userId) return;
+		this.persistedThisRound.add(pl);
+
+		const roundStats = {
+			kills: pl.kills,
+			deaths: pl.deaths,
+			score: pl.score,
+			damage: Math.abs(pl.totalDamage),
+			healing: pl.totalHealing,
+			goals: pl.totalGoals,
+		};
+
+		const previousScore = getUserStats(userId)?.score ?? 0;
+		saveRoundStats(userId, roundStats);
+		incrementQuestProgressFromStats(userId, { ...roundStats, won });
+
+		const stats = getUserStats(userId);
+		const newlyUnlocked = stats ? checkForNewUnlocks(userId, stats.score) : [];
+		if (newlyUnlocked.length > 0) {
+			if (authSocket) authSocket.emit("unlockReveal", newlyUnlocked);
+			// the end-of-round scoreboard has a "Last Reward" column that always read
+			// "No Reward" because nothing ever set this. Rarest first, so it shows the
+			// best thing they earned.
+			const best = newlyUnlocked.toSorted((a, b) => a.chance - b.chance)[0];
+			// a fresh unlock is never a duplicate; duplicates only come out of crates
+			pl.lastItem = {
+				id: String(best.id),
+				type: best.type,
+				name: best.name,
+				chance: best.chance,
+				isDuplicate: false,
+			};
+			this.io.emit("upd", { i: pl.index, li: pl.lastItem });
 		}
+
+		const previousRank = Math.floor(previousScore / 1000);
+		const newRank = stats ? Math.floor(stats.score / 1000) : previousRank;
+		// keep the in-game rank badge over this player's name in sync for everyone else
+		pl.account.rank = newRank;
+		this.io.emit("upd", { i: pl.index, rnk: newRank });
+		if (newRank > previousRank && authSocket) {
+			for (let r = previousRank + 1; r <= newRank; r++) {
+				grantCrate(userId, "rank_up");
+			}
+			authSocket.emit("rankUp", newRank);
+		}
+
+		// round stats just hit the DB — push the finalized account
+		// stats so the client's profile replaces its live projection
+		if (authSocket) {
+			emitAccountStats(authSocket as AuthenticatedSocket);
+		}
+	}
+
+	/** Re-broadcasts the score leaderboard without running any scoring logic. */
+	private broadcastLeaderboard() {
+		this.io.emit(
+			"lb",
+			this.game.players
+				.filter((p) => !p.firstReceive)
+				.toSorted((a, b) => b.score - a.score)
+				.flatMap((pl) => [pl.index]),
+		);
 	}
 
 	updateScore(scored: number, source: Player) {
@@ -885,13 +1316,7 @@ export class Room {
 				this.io.to(source.socketId).emit("5", `+${source.hardpointScore}`);
 			}
 		}
-		this.io.emit(
-			"lb",
-			this.game.players
-				.filter((p) => !p.firstReceive)
-				.toSorted((a, b) => b.score - a.score)
-				.flatMap((pl) => [pl.index]),
-		);
+		this.broadcastLeaderboard();
 		let lbScore = scored / (this.game.mode.score / 100);
 		if (source.team === "red") {
 			lbScore = this.game.score.red += lbScore;
@@ -907,6 +1332,11 @@ export class Room {
 		this.game.score.lb = roundNumber(leading, 0);
 		if (lbScore + 1e-7 >= 100 && !this.game.roundEnd) {
 			this.game.roundEnd = true;
+			const winner = this.game.mode.teams ? `team ${source.team}` : source.name;
+			log.info(
+				"round",
+				`${this.name} ${this.game.mode.code} won by ${winner} — next round in 15s`,
+			);
 			this.io.emit("7", source.team, this.game.modeVotes, false);
 			let timeLeft = 15;
 			let timer = setInterval(() => {
@@ -916,60 +1346,19 @@ export class Room {
 					let sorted = this.game.modeVotes.toSorted(
 						(a, b) => b.votes - a.votes,
 					);
+					const isTeamMode = this.game.mode.teams;
 					for (const pl of this.game.players) {
-						// this.io is a Namespace: `.sockets` is already the id->socket Map
-						const authSocket = pl.socketId
-							? this.io.sockets.get(pl.socketId)
-							: null;
-						const userId = (authSocket as AuthenticatedSocket | null | undefined)?.userId;
-						if (userId) {
-							const previousScore = getUserStats(userId)?.score ?? 0;
-							saveRoundStats(userId, {
-								kills: pl.kills,
-								deaths: pl.deaths,
-								score: pl.score,
-								damage: Math.abs(pl.totalDamage),
-								healing: pl.totalHealing,
-								goals: pl.totalGoals,
-							});
-
-							const isTeamMode = this.game.mode.teams;
-							const won = isTeamMode
-								? pl.team === source.team
-								: pl.index === source.index;
-							incrementQuestProgressFromStats(userId, {
-								kills: pl.kills,
-								deaths: pl.deaths,
-								score: pl.score,
-								damage: Math.abs(pl.totalDamage),
-								healing: pl.totalHealing,
-								goals: pl.totalGoals,
-								won,
-							});
-
-							const stats = getUserStats(userId);
-							const newlyUnlocked = stats ? checkForNewUnlocks(userId, stats.score) : [];
-							if (newlyUnlocked.length > 0 && authSocket) {
-								authSocket.emit("unlockReveal", newlyUnlocked);
-							}
-
-							const previousRank = Math.floor(previousScore / 1000);
-							const newRank = stats ? Math.floor(stats.score / 1000) : previousRank;
-							if (newRank > previousRank && authSocket) {
-								for (let r = previousRank + 1; r <= newRank; r++) {
-									grantCrate(userId, "rank_up");
-								}
-								authSocket.emit("rankUp", newRank);
-							}
-
-							// round stats just hit the DB — push the finalized account
-							// stats so the client's profile replaces its live projection
-							if (authSocket) {
-								emitAccountStats(authSocket as AuthenticatedSocket);
-							}
-						}
+						this.persistPlayerRound(
+							pl,
+							isTeamMode ? pl.team === source.team : pl.index === source.index,
+						);
 					}
 					this.game.newRound(sorted[0].indx);
+					this.persistedThisRound = new WeakSet();
+					log.info(
+						"round",
+						`${this.name} starting ${this.game.mode.code} (${this.game.mode.name}) — ${this.occupancy()} players`,
+					);
 					for (const pl of this.game.players) {
 						// only to the owning socket: broadcasting made every client
 						// adopt the last player's identity after each round
@@ -992,6 +1381,7 @@ export class Room {
 	}
 
 	updateBullet(bullet: Projectile, player: Player, dir: number) {
+		const bulletStartedAt = Date.now();
 		const tick = () => {
 			if (
 				!bullet.active &&
@@ -1039,15 +1429,22 @@ export class Room {
 					}
 				}
 			}
+			// defence in depth behind the targetD clamp: no matter what set
+			// maxLifeTime, a bullet may never outlive this ceiling
+			if (bullet.active && Date.now() - bulletStartedAt > MAX_BULLET_LIFETIME_MS) {
+				bullet.deactivate();
+				return;
+			}
 			if (bullet.active) {
+				const step = Math.max(MIN_BULLET_STEP_MS, player.delta);
 				bullet.update(
-					player.delta,
+					step,
 					Date.now(),
 					this.game.clutter,
-					this.game.tiles,
+					this.game.mapData,
 					this.game.players,
 				);
-				setTimeout(tick, player.delta);
+				setTimeout(tick, step);
 				return;
 			}
 			bullet.deactivate();
@@ -1063,6 +1460,10 @@ export class Room {
 		bullet?: Projectile,
 	) {
 		if (dest?.dead) return;
+		// Projectile.update already skips spawn-protected players, but explosions
+		// reach handleHit directly via doExplosion and used to kill straight through
+		// spawn protection. This is the one choke point every damage source shares.
+		if (dest.isSpawnProtected) return;
 
 		const cappedDmg = Math.max(-dest.health, dmg);
 		dest.health += cappedDmg;
@@ -1171,7 +1572,10 @@ export class Room {
 		const killMessage = isSuicide
 			? `${source.name} committed suicide`
 			: `${source.name} killed ${dest.name}`;
-		console.log(`[kill] [${this.name}] ${killMessage}`);
+		// bot-vs-bot kills are constant background noise in the permanent rooms, so
+		// they only show at debug; anything involving a real player stays at info
+		const involvesHuman = !source.isBot || !dest.isBot;
+		log[involvesHuman ? "info" : "debug"]("kill", `${this.name} ${killMessage}`);
 		this.io.emit("5", killMessage);
 		this.io.emit("3", {
 			dID: source.index,
@@ -1413,7 +1817,7 @@ export class Room {
 	}
 
 	startCheckLootInterval() {
-		setInterval(() => {
+		this.intervals.push(setInterval(() => {
 			if (this.game.roundEnd || this.game.mode.code !== "lc") {
 				return;
 			}
@@ -1435,6 +1839,6 @@ export class Room {
 			const i = this.game.pickups.indexOf(lootToActivate);
 			lootToActivate.active = true;
 			this.io.emit("4", lootToActivate, i, 0);
-		}, 5000);
+		}, 5000));
 	}
 }

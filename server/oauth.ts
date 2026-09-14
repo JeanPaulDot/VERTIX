@@ -10,24 +10,31 @@ import {
 } from "./db.ts";
 import { checkForNewUnlocks } from "./unlocks.ts";
 import { recordLogin } from "./quests.ts";
+import { log } from "./log.ts";
 
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID ?? "";
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET ?? "";
 const DISCORD_REDIRECT_URI =
 	process.env.DISCORD_REDIRECT_URI ?? "http://localhost:5173/api/auth/discord/callback";
 
-// Discord is the only login method now, so surface a misconfigured production
-// deployment loudly instead of silently failing every login attempt.
-if (isProduction()) {
-	if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET) {
-		console.warn(
-			"[oauth] DISCORD_CLIENT_ID/SECRET is empty in production — Discord login will not work.",
-		);
+/**
+ * Discord is the only login method, so a misconfigured production deployment
+ * should be loud rather than silently failing every login attempt.
+ *
+ * Called from index.ts rather than run at import time, so it lands inside the
+ * boot sequence instead of ahead of the banner.
+ */
+export function logOAuthConfig(): void {
+	if (!isProduction()) {
+		log.info("boot", "discord oauth: dev mode, redirect " + DISCORD_REDIRECT_URI);
+		return;
 	}
-	if (DISCORD_REDIRECT_URI.includes("localhost")) {
-		console.warn(
-			`[oauth] DISCORD_REDIRECT_URI still points at localhost in production (${DISCORD_REDIRECT_URI}).`,
-		);
+	if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET) {
+		log.warn("oauth", "DISCORD_CLIENT_ID/SECRET is empty — Discord login will NOT work");
+	} else if (DISCORD_REDIRECT_URI.includes("localhost")) {
+		log.warn("oauth", `DISCORD_REDIRECT_URI still points at localhost (${DISCORD_REDIRECT_URI})`);
+	} else {
+		log.info("boot", `discord oauth: configured (${DISCORD_REDIRECT_URI})`);
 	}
 }
 
@@ -212,6 +219,7 @@ export function createOAuthRoutes(): Hono {
 			const discordUser = await fetchDiscordUser(tokenData.access_token);
 
 			let user = findUserByDiscordId(discordUser.id);
+			const isNewAccount = !user;
 
 			if (!user) {
 				// Check if there's a username conflict
@@ -235,13 +243,15 @@ export function createOAuthRoutes(): Hono {
 			}
 			checkForNewUnlocks(user.id, stats?.score ?? 0);
 
+			log.info("login", `${user.username} signed in via Discord${isNewAccount ? " (new account)" : ""}`);
+
 			const cookie = await createSessionCookie(user.id, user.username);
 			// append: a Set-Cookie header clearing oauth_state is already present
 			c.header("Set-Cookie", cookie, { append: true });
 			recordLogin(user.id);
 			return finish(null);
 		} catch (err) {
-			console.error("Discord OAuth error:", err);
+			log.error("oauth", `login failed: ${err instanceof Error ? err.message : String(err)}`);
 			return finish("oauth_failed");
 		}
 	});

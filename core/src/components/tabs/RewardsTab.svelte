@@ -5,9 +5,10 @@
 		st.socket?.emit("claimQuest", { questId });
 	}
 
-	function claimStreak() {
-		st.socket?.emit("claimStreak");
-	}
+	// No claim button for the streak: recordLogin grants the day-7 crate on the
+	// login itself and rolls the track back to day 1, so there is nothing for the
+	// player to press. (The server's "claimStreak" handler survives for clients
+	// that still emit it; it only resets the counter.)
 
 	function streakDayStyle(day: number): { bg: string; border: string; color: string; label: string } {
 		const current = st.quests.streak.day;
@@ -67,7 +68,7 @@
 </div>
 {#if st.quests.weekly}
 	{@const w = st.quests.weekly}
-	<div class="questRow">
+	<div class="questRow" class:questClaimed={w.claimed}>
 		<div class="questTop">
 			<b class="questName">{w.name}</b>
 			<span class="questReward">{w.reward}</span>
@@ -76,7 +77,14 @@
 			<div class="questBar questBarWeekly">
 				<div class="questBarFillWeekly" style:width={`${Math.min(100, Math.round((w.progress / w.goal) * 100))}%`}></div>
 			</div>
-			<span class="questProgress">{w.progress.toLocaleString()}</span>
+			<span class="questProgress">{w.progress.toLocaleString()}/{w.goal.toLocaleString()}</span>
+			<!-- the weekly block rendered progress but no claim control, so its 2-3
+			     crate rewards could never actually be collected -->
+			{#if w.claimable}
+				<button type="button" class="smallMenuButton questClaimBtn" onclick={() => claimQuest(w.id)}>CLAIM</button>
+			{:else if w.claimed}
+				<span class="questClaimedText">CLAIMED</span>
+			{/if}
 		</div>
 	</div>
 {/if}
