@@ -108,6 +108,39 @@ export function initDb(): void {
 			ip TEXT DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
+
+		CREATE TABLE IF NOT EXISTS sessions (
+			id TEXT PRIMARY KEY,
+			user_id INTEGER,
+			username TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			user_agent TEXT DEFAULT '',
+			room TEXT DEFAULT '',
+			started_at INTEGER NOT NULL,
+			ended_at INTEGER,
+			duration_seconds INTEGER DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_sessions_ip ON sessions(ip);
+
+		CREATE TABLE IF NOT EXISTS user_activity (
+			user_id INTEGER PRIMARY KEY,
+			first_seen INTEGER NOT NULL,
+			last_seen INTEGER NOT NULL,
+			session_count INTEGER NOT NULL DEFAULT 0,
+			play_time_seconds INTEGER NOT NULL DEFAULT 0,
+			last_ip TEXT DEFAULT ''
+		);
+
+		CREATE TABLE IF NOT EXISTS user_ips (
+			username TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			first_seen INTEGER NOT NULL,
+			last_seen INTEGER NOT NULL,
+			count INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (username, ip)
+		);
+		CREATE INDEX IF NOT EXISTS idx_user_ips_ip ON user_ips(ip);
 	`);
 
 	// Migration: add discord columns if missing
@@ -832,4 +865,113 @@ export function getRecentBugReports(limit: number): BugReportRow[] {
 	return getDb()
 		.prepare("SELECT * FROM bug_reports ORDER BY id DESC LIMIT ?")
 		.all(limit) as BugReportRow[];
+}
+
+export function deleteBugReport(id: number): void {
+	getDb().prepare("DELETE FROM bug_reports WHERE id = ?").run(id);
+}
+
+// --- Admin / analytics queries ---
+
+export type AdminUserRow = {
+	id: number;
+	username: string;
+	discord_username: string;
+	discord_avatar: string;
+	created_at: string;
+	score: number;
+	kills: number;
+	deaths: number;
+	total_damage: number;
+	first_seen: number;
+	last_seen: number;
+	session_count: number;
+	play_time_seconds: number;
+	last_ip: string;
+};
+
+export type SessionRow = {
+	id: string;
+	user_id: number | null;
+	username: string;
+	ip: string;
+	user_agent: string;
+	room: string;
+	started_at: number;
+	ended_at: number | null;
+	duration_seconds: number;
+};
+
+export function getAdminUsers(limit: number, offset: number, search?: string): AdminUserRow[] {
+	const where = search ? "WHERE u.username LIKE ?" : "";
+	const params: unknown[] = search ? [`%${search}%`] : [];
+	params.push(limit, offset);
+	return getDb()
+		.prepare(
+			`SELECT u.id, u.username, u.discord_username, u.discord_avatar, u.created_at,
+					COALESCE(ps.score, 0) AS score, COALESCE(ps.kills, 0) AS kills,
+					COALESCE(ps.deaths, 0) AS deaths, COALESCE(ps.total_damage, 0) AS total_damage,
+					COALESCE(ua.first_seen, 0) AS first_seen, COALESCE(ua.last_seen, 0) AS last_seen,
+					COALESCE(ua.session_count, 0) AS session_count,
+					COALESCE(ua.play_time_seconds, 0) AS play_time_seconds,
+					COALESCE(ua.last_ip, '') AS last_ip
+			FROM users u
+			LEFT JOIN player_stats ps ON ps.user_id = u.id
+			LEFT JOIN user_activity ua ON ua.user_id = u.id
+			${where}
+			ORDER BY COALESCE(ua.last_seen, 0) DESC
+			LIMIT ? OFFSET ?`,
+		)
+		.all(...params) as AdminUserRow[];
+}
+
+export function getAdminUserCount(search?: string): number {
+	const where = search ? "WHERE username LIKE ?" : "";
+	const params: unknown[] = search ? [`%${search}%`] : [];
+	const row = getDb()
+		.prepare(`SELECT COUNT(*) AS n FROM users ${where}`)
+		.get(...params) as { n: number };
+	return row.n;
+}
+
+export function getRecentSessions(limit: number): SessionRow[] {
+	return getDb()
+		.prepare("SELECT * FROM sessions ORDER BY started_at DESC LIMIT ?")
+		.all(limit) as SessionRow[];
+}
+
+export function getSessionsForUser(userId: number, limit: number): SessionRow[] {
+	return getDb()
+		.prepare("SELECT * FROM sessions WHERE user_id = ? ORDER BY started_at DESC LIMIT ?")
+		.all(userId, limit) as SessionRow[];
+}
+
+export function getUsernamesForIp(ip: string): { username: string; first_seen: number; last_seen: number; count: number }[] {
+	return getDb()
+		.prepare("SELECT username, first_seen, last_seen, count FROM user_ips WHERE ip = ? ORDER BY last_seen DESC")
+		.all(ip) as { username: string; first_seen: number; last_seen: number; count: number }[];
+}
+
+export function getIpsForUsername(username: string): { ip: string; first_seen: number; last_seen: number; count: number }[] {
+	return getDb()
+		.prepare("SELECT ip, first_seen, last_seen, count FROM user_ips WHERE username = ? ORDER BY last_seen DESC")
+		.all(username) as { ip: string; first_seen: number; last_seen: number; count: number }[];
+}
+
+export function getAdminUserById(id: number): AdminUserRow | undefined {
+	return getDb()
+		.prepare(
+			`SELECT u.id, u.username, u.discord_username, u.discord_avatar, u.created_at,
+					COALESCE(ps.score, 0) AS score, COALESCE(ps.kills, 0) AS kills,
+					COALESCE(ps.deaths, 0) AS deaths, COALESCE(ps.total_damage, 0) AS total_damage,
+					COALESCE(ua.first_seen, 0) AS first_seen, COALESCE(ua.last_seen, 0) AS last_seen,
+					COALESCE(ua.session_count, 0) AS session_count,
+					COALESCE(ua.play_time_seconds, 0) AS play_time_seconds,
+					COALESCE(ua.last_ip, '') AS last_ip
+			FROM users u
+			LEFT JOIN player_stats ps ON ps.user_id = u.id
+			LEFT JOIN user_activity ua ON ua.user_id = u.id
+			WHERE u.id = ?`,
+		)
+		.get(id) as AdminUserRow | undefined;
 }

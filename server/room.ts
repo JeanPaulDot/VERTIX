@@ -53,6 +53,7 @@ import {
 	grantCrate,
 } from "./db.ts";
 import { checkForNewUnlocks } from "./unlocks.ts";
+import { trackSessionStart, trackSessionEnd } from "./analytics.ts";
 import { incrementQuestProgressFromStats, getQuestProgressSnapshot } from "./quests.ts";
 import {
 	attachSocketSession,
@@ -324,6 +325,26 @@ export class Room {
 			setupAuthHandlers(authSocket);
 			recordLoginForSocket(authSocket);
 			emitAccountStats(authSocket);
+
+			// analytics: track this room session (queued async, never blocks the loop)
+			const clientIp = getClientIp(
+				Array.isArray(socket.handshake.headers["x-forwarded-for"])
+					? socket.handshake.headers["x-forwarded-for"].join(",")
+					: socket.handshake.headers["x-forwarded-for"],
+				socket.handshake.address,
+			);
+			const sessionId = crypto.randomUUID();
+			const sessionStartedAt = Date.now();
+			trackSessionStart({
+				id: sessionId,
+				userId: authSocket.userId ?? null,
+				username: authSocket.username ?? "(guest)",
+				ip: clientIp,
+				userAgent: (socket.handshake.headers["user-agent"] ?? "").substring(0, 200),
+				room: this.name,
+				startedAt: sessionStartedAt,
+			});
+
 			let player = this.game.newPlayer();
 			player.socketId = socket.id;
 			let hasLoggedJoin = false;
@@ -415,11 +436,6 @@ export class Room {
 					hasLoggedJoin = true;
 					joinedAt = Date.now();
 					const who = authSocket.username ? `${player.name}` : `${player.name} (guest)`;
-					const forwarded = socket.handshake.headers["x-forwarded-for"];
-					const clientIp = getClientIp(
-						Array.isArray(forwarded) ? forwarded.join(",") : forwarded,
-						socket.handshake.address,
-					);
 					log.info("join", `${who} (${clientIp}) -> ${this.describe()} ${this.isPermanent ? "" : "[private]"}`.trim());
 				}
 
@@ -492,6 +508,12 @@ export class Room {
 				// bank the round before dropping them, otherwise leaving mid-round
 				// throws away every point, kill and quest tick they earned
 				this.persistPlayerRound(player, false);
+				trackSessionEnd({
+					id: sessionId,
+					userId: authSocket.userId ?? null,
+					endedAt: Date.now(),
+					durationSeconds: Math.max(0, Math.floor((Date.now() - sessionStartedAt) / 1000)),
+				});
 				if (hasLoggedJoin) {
 					const played = formatDuration(Date.now() - joinedAt);
 					log.info(

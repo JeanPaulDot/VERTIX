@@ -65,14 +65,31 @@
 			} catch {
 				/* keep polling */
 			}
+			if (loggedIn) {
+				clearInterval(poll);
+				st.messages.login = "Logged in!";
+				return;
+			}
 			let popupClosed = false;
 			try {
 				popupClosed = popup.closed;
 			} catch {
 				/* opener/popup reference may be neutered by COOP; ignore */
 			}
-			// stop once logged in, the popup closed, or after ~5 minutes
-			if (loggedIn || popupClosed || tries >= 150) {
+			// stop once the popup closed or after ~5 minutes
+			if (popupClosed || tries >= 150) {
+				// The popup can close in the same instant the session cookie is
+				// committed, so the refreshLogin() above may have raced it and missed
+				// the login. Re-check once now that the popup is gone — the cookie is
+				// committed before the callback's window.close() runs — so a successful
+				// login shows up without forcing a full page refresh.
+				if (popupClosed) {
+					try {
+						loggedIn = await window.refreshLogin();
+					} catch {
+						/* fall through */
+					}
+				}
 				clearInterval(poll);
 				if (loggedIn) {
 					st.messages.login = "Logged in!";

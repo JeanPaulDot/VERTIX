@@ -2,7 +2,17 @@ import { Hono } from "hono";
 import { timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { rooms } from "./room.ts";
-import { getRecentBugReports } from "./db.ts";
+import {
+	getRecentBugReports,
+	deleteBugReport,
+	getAdminUsers,
+	getAdminUserCount,
+	getAdminUserById,
+	getRecentSessions,
+	getSessionsForUser,
+	getUsernamesForIp,
+	getIpsForUsername,
+} from "./db.ts";
 import { log, formatDuration } from "./log.ts";
 import { createRateLimiter, getClientIp } from "./security.ts";
 
@@ -12,7 +22,7 @@ import { createRateLimiter, getClientIp } from "./security.ts";
 // unauthorized attempts are rate-limited so they can't be used to flood the log
 // or brute-force the token.
 
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? "";
+const ADMIN_TOKEN = (process.env.ADMIN_TOKEN ?? "").trim();
 const MIN_ADMIN_TOKEN_LENGTH = 16;
 
 export function adminEnabled(): boolean {
@@ -32,7 +42,7 @@ export function logAdminConfig(): void {
 
 function tokenMatches(supplied: string): boolean {
 	const expected = Buffer.from(ADMIN_TOKEN);
-	const given = Buffer.from(supplied);
+	const given = Buffer.from(supplied.trim());
 	// length mismatch is safe to short-circuit on (both are just byte buffers here)
 	if (given.length !== expected.length) return false;
 	return timingSafeEqual(given, expected);
@@ -119,6 +129,50 @@ export function createAdminRoutes(): Hono {
 
 	app.get("/overview", (c) => c.json(buildOverview()));
 	app.get("/bugReports", (c) => c.json(getRecentBugReports(100)));
+	app.delete("/bugReports/:id", (c) => {
+		const id = Number.parseInt(c.req.param("id"), 10);
+		if (!Number.isInteger(id) || id <= 0) {
+			return c.json({ error: "Invalid id" }, 400);
+		}
+		deleteBugReport(id);
+		return c.json({ ok: true });
+	});
+
+	app.get("/users", (c) => {
+		const q = c.req.query("q")?.trim() || undefined;
+		const page = Math.max(1, Number.parseInt(c.req.query("page") ?? "1", 10) || 1);
+		const limit = Math.min(100, Math.max(1, Number.parseInt(c.req.query("limit") ?? "50", 10) || 50));
+		const offset = (page - 1) * limit;
+		return c.json({
+			users: getAdminUsers(limit, offset, q),
+			total: getAdminUserCount(q),
+			page,
+			limit,
+		});
+	});
+
+	app.get("/users/:id", (c) => {
+		const id = Number.parseInt(c.req.param("id"), 10);
+		if (!Number.isInteger(id) || id <= 0) {
+			return c.json({ error: "Invalid id" }, 400);
+		}
+		const user = getAdminUserById(id);
+		if (!user) return c.json({ error: "Not found" }, 404);
+		return c.json({
+			user,
+			sessions: getSessionsForUser(id, 50),
+			ips: getIpsForUsername(user.username),
+		});
+	});
+
+	app.get("/sessions", (c) => {
+		const limit = Math.min(200, Math.max(1, Number.parseInt(c.req.query("limit") ?? "100", 10) || 100));
+		return c.json(getRecentSessions(limit));
+	});
+
+	app.get("/ips/:ip", (c) => {
+		return c.json(getUsernamesForIp(c.req.param("ip")));
+	});
 
 	return app;
 }

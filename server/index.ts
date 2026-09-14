@@ -42,7 +42,8 @@ import {
 } from "./auth.ts";
 import { createOAuthRoutes, logOAuthConfig } from "./oauth.ts";
 import { createAdminRoutes, trackLobbyPlayer, untrackLobbyPlayer, logAdminConfig } from "./admin.ts";
-import { ADMIN_PAGE_HTML } from "./admin-page.ts";
+import { ADMIN_PAGE_HTML, ADMIN_PAGE_JS } from "./admin-page.ts";
+import { flushAnalytics } from "./analytics.ts";
 import { log, formatDuration } from "./log.ts";
 import { defaultGenData } from "./maps.ts";
 
@@ -484,6 +485,14 @@ app.get("/admin", (c) => {
 	return c.body(ADMIN_PAGE_HTML);
 });
 
+// The admin page's script lives in a separate file because the server CSP is
+// `script-src 'self'`, which blocks inline <script> tags.
+app.get("/admin.js", (c) => {
+	c.header("Content-Type", "application/javascript; charset=utf-8");
+	c.header("Cache-Control", "no-store");
+	return c.body(ADMIN_PAGE_JS);
+});
+
 const MIME: Record<string, string> = {
 	".html": "text/html",
 	".js": "application/javascript",
@@ -619,6 +628,7 @@ if (STATUS_INTERVAL_MS > 0) {
 
 function shutdown(signal: string) {
 	log.info("boot", `${signal} received — shutting down after ${formatDuration(Date.now() - bootStartedAt)}`);
+	flushAnalytics();
 	server.close();
 	io.close();
 	process.exit(0);

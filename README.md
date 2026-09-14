@@ -2,6 +2,16 @@
 
 A web-based multiplayer arena shooter — a modern revival of Vertix Online. Built with Svelte 5, Hono, Socket.IO, and SQLite.
 
+## License
+
+A derivative of the [Vertix revival project](https://github.com/KrunkerRevivalProject/vertix)
+by theGu5, Dreamery, and Dragonn44
+([thegu5](https://github.com/thegu5), [Imfromkrunker](https://github.com/Imfromkrunker), [lostindreamery](https://github.com/lostindreamery)).
+
+Released under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+(non-commercial, attribution required, share-alike). See
+[LICENSE.md](LICENSE.md) and [CREDITS.md](CREDITS.md).
+
 ## Features
 
 ### Gameplay
