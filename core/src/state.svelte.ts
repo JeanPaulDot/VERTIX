@@ -161,7 +161,7 @@ export const st = $state({
 	// false for private/custom rooms, whose rounds don't count toward stats or quests
 	roomRanked: true,
 	// which main-menu modal is open (null = none)
-	menuModal: null as null | "account" | "rooms" | "settings" | "controls" | "mods",
+	menuModal: null as null | "account" | "rooms" | "settings" | "controls" | "mods" | "bug",
 	// quest system state
 	quests: {
 		daily: [] as QuestItem[],

@@ -267,10 +267,24 @@ export class Game {
 			pl.isBoss = false;
 			pl.onScreen = false;
 			pl.dead = true;
-			pl.lastModeVote = undefined; //TODO
-			pl.team = this.getTeam(pl.index);
+			pl.lastModeVote = undefined;
 			pl.firstReceive = true;
 			pl.likedBy = [];
+		}
+
+		// Boss Hunt needs exactly one boss, deterministically assigned. Prefer a
+		// human (bots only backfill after a real player joins), and fall back to
+		// the earliest player if somehow everyone in the room is a bot.
+		if (this.mode.code === "boss") {
+			const humans = this.players.filter((p) => !p.isBot);
+			const boss = humans[0] ?? this.players[0];
+			for (const pl of this.players) {
+				pl.team = pl === boss ? "blue" : "red";
+			}
+		} else {
+			for (const pl of this.players) {
+				pl.team = this.getTeam(pl.index);
+			}
 		}
 		this.genClutter();
 		this.genPickups();

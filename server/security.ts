@@ -2,6 +2,10 @@ import { PLAYER_SELECTABLE_CLASS_COUNT } from "core/src/loadouts.ts";
 import { camos, hats, shirts } from "core/src/skins.ts";
 
 const HTML_TAG_RE = /<[^>]*>/g;
+// control characters + DEL. Stripping these from anything we log or echo
+// prevents log injection (e.g. a name like "foo\n[boot] hacked") and ANSI
+// escape spoofing in `docker compose logs`.
+const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/g;
 const MAX_NAME_LENGTH = 25;
 const MAX_CHAT_LENGTH = 50;
 const MAX_MOVEMENT_DELTA = 100;
@@ -13,7 +17,7 @@ const MAX_SHOOT_DISTANCE = 500;
 
 export function sanitizeName(name: unknown): string {
 	if (typeof name !== "string") return "UNKNOWN";
-	const cleaned = name.replace(HTML_TAG_RE, "").trim();
+	const cleaned = name.replace(HTML_TAG_RE, "").replace(CONTROL_CHAR_RE, "").trim();
 	if (cleaned.length === 0) return "UNKNOWN";
 	return cleaned.substring(0, MAX_NAME_LENGTH);
 }
@@ -106,7 +110,7 @@ export function isWithinShootDistance(
 
 export function sanitizeChatMessage(msg: unknown): string {
 	if (typeof msg !== "string") return "";
-	return msg.substring(0, MAX_CHAT_LENGTH);
+	return msg.replace(CONTROL_CHAR_RE, "").substring(0, MAX_CHAT_LENGTH);
 }
 
 export function clampMovementDelta(value: unknown): number {

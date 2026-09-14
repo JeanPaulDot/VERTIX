@@ -7,6 +7,7 @@ import {
 	findUserByUsername,
 	getUserStats,
 	createEmptyStats,
+	bumpSessionVersion,
 } from "./db.ts";
 import { checkForNewUnlocks } from "./unlocks.ts";
 import { recordLogin } from "./quests.ts";
@@ -270,7 +271,13 @@ export function createOAuthRoutes(): Hono {
 		return c.json(payload);
 	});
 
-	app.get("/auth/logout", (c) => {
+	app.get("/auth/logout", async (c) => {
+		// Revoke server-side before clearing the cookie: a leaked token stays valid
+		// for its full 7 days otherwise. Bumping the session version invalidates it.
+		const session = await validateSession(c.req.header("Cookie"));
+		if (session) {
+			bumpSessionVersion(session.userId);
+		}
 		const cookie = `vertix_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
 		c.header("Set-Cookie", cookie);
 		return c.redirect("/");

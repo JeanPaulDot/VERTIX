@@ -10,6 +10,7 @@
 	import LoadoutCard from "./LoadoutCard.svelte";
 	import Modal from "./common/Modal.svelte";
 	import RewardPopup from "./RewardPopup.svelte";
+	import BugReport from "./BugReport.svelte";
 	import RoomList from "./RoomList.svelte";
 	import Settings from "./Settings.svelte";
 	import StartMenu from "./StartMenu.svelte";
@@ -128,6 +129,9 @@
 	</Modal>
 	<Modal open={st.menuModal === "account"} onclose={closeMenuModal} scrollable={false}>
 		<div class="menuModalContent"><AccountWidget /></div>
+	</Modal>
+	<Modal open={st.menuModal === "bug"} title="REPORT A BUG" onclose={closeMenuModal}>
+		<div class="menuModalContent"><BugReport /></div>
 	</Modal>
 </div>
 <div id="linkBoxRight">

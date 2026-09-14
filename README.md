@@ -17,6 +17,7 @@ A web-based multiplayer arena shooter — a modern revival of Vertix Online. Bui
 - **Ranked Progression** — earn score to rank up (every 1,000 score), cosmetic unlocks at score milestones
 - **Crate Reward System** — earn crates on rank up, open them for random cosmetics weighted by rarity
 - **127 Hats, 133+ Camos, 70+ Shirts** — each with rarity tiers (Common → Legendary)
+- **83 Sprays** — equippable tags/flags/logos you can spray on walls in-game
 
 ### Quest System
 - **Daily Quests** — 3 random quests per day (UTC midnight rotation), earn score or crate rewards
@@ -36,6 +37,7 @@ A web-based multiplayer arena shooter — a modern revival of Vertix Online. Bui
 - **Room Browser** — filter by mode, search by code, create private rooms
 - **Settings** — graphics toggles, keybind customization, chat options
 - **Reward Popups** — animated crate opening, unlock reveals, rank-up notifications
+- **Admin Dashboard** — private `/admin` view of live rooms, players, lobby presence and user bug reports (gated by `ADMIN_TOKEN`)
 
 ## Tech Stack
 
@@ -146,6 +148,7 @@ Open http://localhost:5173
    SESSION_SECRET=<random-64-char-string>
    CORS_ORIGINS=https://vertix.vestiges.tech
    TRUST_PROXY=1
+   ADMIN_TOKEN=<random-string>   # enables /admin (optional, min 16 chars)
    ```
 
    `TRUST_PROXY` is the number of reverse proxies in front of the server (nginx or
@@ -170,6 +173,25 @@ Open http://localhost:5173
 
 4. The server runs on port `1118` in production (page + `/api` + Socket.IO). Port
    `1119` is dev-only, where Vite proxies the socket separately.
+
+### Data directory permissions
+
+The container runs as the unprivileged `node` user (uid/gid `1000`). The `./data`
+bind mount serves mods to clients **and** holds the writable `vertix.db`, and a
+bind mount keeps whatever ownership the host directory has. If `./data` is owned
+by `root` (for example, Docker creates it as root on the first `docker compose
+up`), the database opens read-only and the server crash-loops with
+`SqliteError: attempt to write a readonly database`.
+
+Fix it once on the host, then start again:
+
+```bash
+sudo chown -R 1000:1000 data
+docker compose up -d
+```
+
+`1000:1000` is the `node` user inside the `node:24-alpine` image, so this makes
+the host directory writable by the process actually running the server.
 
 ### Reverse proxy
 
@@ -255,8 +277,6 @@ Quest score rewards are **bonus score** — they do not affect ranking.
 - [ ] Input validation overhaul — standard-schema integration for socket events
       (the highest-risk fields are clamped in `security.ts`, but validation is
       still ad hoc per handler)
-- [ ] Session revocation — logout only clears the cookie, so a leaked JWT stays
-      valid for its full 7 days
 - [ ] `/api/friends` returns the whole Discord-linked directory; paginate it
 - [ ] Game over menu — finish moving from JSX to Svelte
 
@@ -307,5 +327,14 @@ Quest score rewards are **bonus score** — they do not affect ranking.
 - [x] Keybind customization
 - [x] Mod pack loader
 - [x] Docker deployment
+- [x] Session revocation — JWT carries a session version; logout bumps it so a
+      leaked token stops validating (server-side, not just cookie clearing)
+- [x] Log injection hardening — control chars/ANSI stripped from names and chat
+- [x] Boss Hunt via mode vote — boss class/health is re-applied on round
+      transition, and the boss role is reset when the mode rotates away
+- [x] Admin dashboard — `/admin` with live rooms, players and lobby presence,
+      gated by `ADMIN_TOKEN`
+- [x] Bug reports — users can submit a report from the menu; it lands in the
+      admin dashboard (rate-limited and sanitised)
 
 </details>

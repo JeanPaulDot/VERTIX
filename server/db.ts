@@ -29,6 +29,7 @@ export function initDb(): void {
 			hat_id INTEGER DEFAULT 0,
 			shirt_id INTEGER DEFAULT 0,
 			channel TEXT DEFAULT '',
+			session_version INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 
@@ -96,6 +97,17 @@ export function initDb(): void {
 			streak_day INTEGER NOT NULL DEFAULT 0,
 			last_login_date TEXT NOT NULL DEFAULT ''
 		);
+
+		CREATE TABLE IF NOT EXISTS bug_reports (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			message TEXT NOT NULL,
+			username TEXT DEFAULT '',
+			room TEXT DEFAULT '',
+			mode TEXT DEFAULT '',
+			user_agent TEXT DEFAULT '',
+			ip TEXT DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
 	`);
 
 	// Migration: add discord columns if missing
@@ -109,6 +121,9 @@ export function initDb(): void {
 	}
 	if (!colNames.includes("discord_avatar")) {
 		db.exec("ALTER TABLE users ADD COLUMN discord_avatar TEXT DEFAULT ''");
+	}
+	if (!colNames.includes("session_version")) {
+		db.exec("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0");
 	}
 	// Create unique index on discord_id if it doesn't exist
 	const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_discord_id'").all();
@@ -144,6 +159,7 @@ export type UserRow = {
 	hat_id: number;
 	shirt_id: number;
 	channel: string;
+	session_version: number;
 	created_at: string;
 };
 
@@ -161,6 +177,19 @@ export function findUserByDiscordId(discordId: string): UserRow | undefined {
 	return getDb().prepare("SELECT * FROM users WHERE discord_id = ?").get(discordId) as
 		| UserRow
 		| undefined;
+}
+
+/** Current session version for a user — bumping it invalidates every issued JWT. */
+export function getSessionVersion(userId: number): number {
+	const row = getDb()
+		.prepare("SELECT session_version FROM users WHERE id = ?")
+		.get(userId) as { session_version: number } | undefined;
+	return row?.session_version ?? 0;
+}
+
+/** Increments the session version, revoking all outstanding sessions for the user. */
+export function bumpSessionVersion(userId: number): void {
+	getDb().prepare("UPDATE users SET session_version = session_version + 1 WHERE id = ?").run(userId);
 }
 
 /** All accounts with a linked Discord — the pool "Find Friends" searches. */
@@ -769,4 +798,38 @@ export function getClanLeaderboard(sortBy: "rank" | "kdr", limit: number): ClanP
 			: withComputed.toSorted((a, b) => b.rank - a.rank);
 
 	return sorted.slice(0, limit).map((c, i) => ({ ...c, position: i + 1 }));
+}
+
+// --- Bug reports ---
+
+export type BugReportRow = {
+	id: number;
+	message: string;
+	username: string;
+	room: string;
+	mode: string;
+	user_agent: string;
+	ip: string;
+	created_at: string;
+};
+
+export function createBugReport(data: {
+	message: string;
+	username: string;
+	room: string;
+	mode: string;
+	userAgent: string;
+	ip: string;
+}): void {
+	getDb()
+		.prepare(
+			"INSERT INTO bug_reports (message, username, room, mode, user_agent, ip) VALUES (?, ?, ?, ?, ?, ?)",
+		)
+		.run(data.message, data.username, data.room, data.mode, data.userAgent, data.ip);
+}
+
+export function getRecentBugReports(limit: number): BugReportRow[] {
+	return getDb()
+		.prepare("SELECT * FROM bug_reports ORDER BY id DESC LIMIT ?")
+		.all(limit) as BugReportRow[];
 }

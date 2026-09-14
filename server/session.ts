@@ -1,4 +1,5 @@
 import { SignJWT, jwtVerify } from "jose";
+import { getSessionVersion } from "./db.ts";
 
 const SESSION_COOKIE = "vertix_session";
 const MAX_AGE = 7 * 24 * 60 * 60; // 7 days in seconds
@@ -30,7 +31,10 @@ export async function createSessionToken(
 	userId: number,
 	username: string,
 ): Promise<string> {
-	return new SignJWT({ userId, username })
+	// Bind the token to the user's current session version so bumping it on
+	// logout (or a future password/security reset) invalidates every issued JWT.
+	const sv = getSessionVersion(userId);
+	return new SignJWT({ userId, username, sv })
 		.setProtectedHeader({ alg: "HS256" })
 		.setIssuedAt()
 		.setExpirationTime(`${MAX_AGE}s`)
@@ -42,8 +46,12 @@ export async function validateSessionToken(
 ): Promise<SessionPayload | null> {
 	try {
 		const { payload } = await jwtVerify(token, getSecret());
+		const userId = payload.userId as number;
+		// Reject tokens whose session version no longer matches: the account has
+		// been logged out (or reset) since this token was issued.
+		if (getSessionVersion(userId) !== (payload.sv as number)) return null;
 		return {
-			userId: payload.userId as number,
+			userId,
 			username: payload.username as string,
 		};
 	} catch {
@@ -59,10 +67,6 @@ export async function createSessionCookie(
 	const encoded = encodeURIComponent(token);
 	const secure = isProduction() ? "; Secure" : "";
 	return `${SESSION_COOKIE}=${encoded}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${MAX_AGE}${secure}`;
-}
-
-export function clearSessionCookie(): string {
-	return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
 }
 
 export async function validateSession(

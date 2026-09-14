@@ -19,6 +19,7 @@ import {
 	findUserByUsernameInsensitive,
 	updateUserProfile,
 	getWorldRank,
+	bumpSessionVersion,
 } from "./db.ts";
 import { validateSession } from "./session.ts";
 import { openCrateForUser } from "./unlocks.ts";
@@ -117,6 +118,10 @@ export function setupAuthHandlers(socket: AuthenticatedSocket): void {
 	});
 
 	socket.on("dbLogout", () => {
+		// revoke the session server-side, not just drop the local cookie reference
+		if (socket.userId) {
+			bumpSessionVersion(socket.userId);
+		}
 		socket.userId = undefined;
 		socket.username = undefined;
 	});

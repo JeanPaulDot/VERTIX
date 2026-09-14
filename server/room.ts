@@ -41,6 +41,7 @@ import {
 	createRateLimiter,
 	createIntervalLimiter,
 	isValidGenData,
+	getClientIp,
 } from "./security.ts";
 import {
 	saveRoundStats,
@@ -260,6 +261,7 @@ export class Room {
 		const mapRejected = !!data.srvMap && !isValidGenData(data.srvMap);
 		const customMap = data.srvMap && !mapRejected ? data.srvMap : undefined;
 		this.game.newRound(modeIndex, customMap);
+		this.applyLoadoutsToAll();
 		return !mapRejected;
 	}
 
@@ -413,7 +415,12 @@ export class Room {
 					hasLoggedJoin = true;
 					joinedAt = Date.now();
 					const who = authSocket.username ? `${player.name}` : `${player.name} (guest)`;
-					log.info("join", `${who} -> ${this.describe()} ${this.isPermanent ? "" : "[private]"}`.trim());
+					const forwarded = socket.handshake.headers["x-forwarded-for"];
+					const clientIp = getClientIp(
+						Array.isArray(forwarded) ? forwarded.join(",") : forwarded,
+						socket.handshake.address,
+					);
+					log.info("join", `${who} (${clientIp}) -> ${this.describe()} ${this.isPermanent ? "" : "[private]"}`.trim());
 				}
 
 				player.onScreen = true;
@@ -955,6 +962,9 @@ export class Room {
 
 	/** Applies gamemode class overrides + class stats/weapons (shared by "gotit" and bot spawns). */
 	private applyClassLoadout(player: Player) {
+		// always clear first: a player who was the boss in a previous round must
+		// not stay flagged as the boss once the mode rotates away from Boss Hunt
+		player.isBoss = false;
 		if (this.game.mode.code === "snipe") {
 			player.classIndex = 2;
 		} else if (this.game.mode.code === "rckt") {
@@ -978,6 +988,21 @@ export class Room {
 		player.jumpStrength = currentClass.jumpStrength;
 		player.gravityStrength = currentClass.gravityStrength;
 		this.resetWeaponRuntime(player);
+	}
+
+	/**
+	 * Re-applies class loadouts to every player right after a round transition.
+	 *
+	 * Without this, when Boss Hunt is reached by mode vote (not a dedicated
+	 * room) the freshly-assigned boss keeps their previous round's class, health
+	 * and isBoss=false until their client happens to emit "gotit" — so the boss
+	 * could fight a whole spawn cycle as a normal 100hp class, or nobody at all
+	 * is flagged as the boss. This makes the transition deterministic.
+	 */
+	private applyLoadoutsToAll() {
+		for (const pl of this.game.players) {
+			this.applyClassLoadout(pl);
+		}
 	}
 
 	// --- AI bots ---
@@ -1354,6 +1379,7 @@ export class Room {
 						);
 					}
 					this.game.newRound(sorted[0].indx);
+					this.applyLoadoutsToAll();
 					this.persistedThisRound = new WeakSet();
 					log.info(
 						"round",

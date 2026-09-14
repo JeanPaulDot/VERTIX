@@ -27,6 +27,7 @@ import {
 	findUserById,
 	findUserByUsername,
 	getDiscordConnectedUsers,
+	createBugReport,
 } from "./db.ts";
 import { validateSession } from "./session.ts";
 import { checkForNewUnlocks, getUserUnlockedItems } from "./unlocks.ts";
@@ -40,6 +41,8 @@ import {
 	type AuthenticatedSocket,
 } from "./auth.ts";
 import { createOAuthRoutes, logOAuthConfig } from "./oauth.ts";
+import { createAdminRoutes, trackLobbyPlayer, untrackLobbyPlayer, logAdminConfig } from "./admin.ts";
+import { ADMIN_PAGE_HTML } from "./admin-page.ts";
 import { log, formatDuration } from "./log.ts";
 import { defaultGenData } from "./maps.ts";
 
@@ -73,10 +76,16 @@ if (process.env.NODE_ENV === "production" && allowedOrigins.includes("*")) {
 }
 log.info("boot", `cors origins: ${allowedOrigins.join(", ")}`);
 logOAuthConfig();
+logAdminConfig();
 
 const createRoomLimiter = createRateLimiter(3, 60000);
 const profileLimiter = createRateLimiter(30, 60000);
 const leaderboardLimiter = createRateLimiter(20, 60000);
+// room browser + autoJoin poll: generous enough for a few open tabs, but still
+// stops an unauthenticated client from hammering the room list
+const roomBrowserLimiter = createRateLimiter(60, 60000);
+// bug reports: generous enough for a legit user, but stops a bot spamming the DB
+const bugReportLimiter = createRateLimiter(5, 600000);
 // Households, phone networks and schools share one address, so a low per-IP cap
 // locks out legitimate players sitting next to each other. The real protection
 // against a single abusive host is the global cap below.
@@ -177,13 +186,22 @@ io.use(async (socket, next) => {
 // room so quests/account/unlocks work in the menu. Reuses the same auth handlers
 // as room namespaces; the client swaps to a room socket on join.
 io.on("connection", (socket: Socket) => {
-	setupAuthHandlers(socket as AuthenticatedSocket);
+	const authSocket = socket as AuthenticatedSocket;
+	const forwarded = socket.handshake.headers["x-forwarded-for"];
+	const ip = getClientIp(
+		Array.isArray(forwarded) ? forwarded.join(",") : forwarded,
+		socket.handshake.address,
+	);
+	// the root namespace is the menu/lobby — track presence for the admin dashboard
+	trackLobbyPlayer(socket.id, authSocket.username ?? "(guest)", ip);
+	socket.on("disconnect", () => untrackLobbyPlayer(socket.id));
+	setupAuthHandlers(authSocket);
 	setupProfileHandler(socket);
 	// count today's login before emitting stats, so any streak score/crate is included
-	recordLoginForSocket(socket as AuthenticatedSocket);
+	recordLoginForSocket(authSocket);
 	// If session cookie validated, emit account data + owned cosmetics automatically
-	emitAccountStats(socket as AuthenticatedSocket);
-	emitUnlocks(socket as AuthenticatedSocket);
+	emitAccountStats(authSocket);
+	emitUnlocks(authSocket);
 });
 
 const api = new Hono();
@@ -202,8 +220,12 @@ api.use(
 );
 
 api.route("/", createOAuthRoutes());
+api.route("/admin", createAdminRoutes());
 
 api.get("/getIP", (c) => {
+	if (!roomBrowserLimiter(getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip")))) {
+		return c.json({ error: "Rate limit exceeded" }, 429);
+	}
 	const roomName = c.req.query("room");
 	const room = rooms.find((r) => r.name === roomName);
 	if (!room) {
@@ -218,6 +240,9 @@ api.get("/getIP", (c) => {
 });
 
 api.get("/autoJoin", (c) => {
+	if (!roomBrowserLimiter(getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip")))) {
+		return c.json({ error: "Rate limit exceeded" }, 429);
+	}
 	const withOne = rooms.find((r) => r.game.players.length === 1 && r.game.players.length < r.game.maxPlayers);
 	if (withOne) {
 		return c.json({ room: withOne.name });
@@ -287,6 +312,9 @@ api.get("/health", (c) => {
 });
 
 api.get("/getRooms", (c) => {
+	if (!roomBrowserLimiter(getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip")))) {
+		return c.json({ error: "Rate limit exceeded" }, 429);
+	}
 	const list = rooms.map((r) => ({
 		n: r.name,
 		m: r.game.mode.code,
@@ -388,6 +416,33 @@ api.get("/profile/:username", (c) => {
 	return c.json({ ...profile, unlocks });
 });
 
+// User-submitted bug reports, surfaced in the admin dashboard. Sanitised and
+// rate-limited; the report is stored with the (optional) session username, the
+// room/mode they were in, their user agent and IP for triage.
+api.post("/bugReport", async (c) => {
+	const clientIp = getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip"));
+	if (!bugReportLimiter(clientIp)) {
+		return c.json({ error: "Rate limit exceeded" }, 429);
+	}
+	const data = await c.req.json().catch(() => ({}));
+	const strip = (s: string) => s.replace(/[\x00-\x1f\x7f]/g, "").trim();
+	const message = strip(typeof data?.message === "string" ? data.message : "").substring(0, 2000);
+	if (message.length === 0) {
+		return c.json({ error: "Message required" }, 400);
+	}
+	const session = await validateSession(c.req.header("Cookie"));
+	createBugReport({
+		message,
+		username: session?.username ?? "",
+		room: strip(typeof data?.room === "string" ? data.room : "").substring(0, 20),
+		mode: strip(typeof data?.mode === "string" ? data.mode : "").substring(0, 20),
+		userAgent: strip(c.req.header("user-agent") ?? "").substring(0, 200),
+		ip: clientIp,
+	});
+	log.info("bugreport", `new report from ${session?.username ?? "(guest)"} (${clientIp})`);
+	return c.json({ ok: true });
+});
+
 // root app: API mounted under /api, static files (production) at /
 const app = new Hono();
 
@@ -421,6 +476,13 @@ app.use(
 	}),
 );
 app.route("/api", api);
+
+// Admin dashboard page. The HTML is public (it does nothing without the token);
+// every /api/admin/* call behind it is gated on ADMIN_TOKEN.
+app.get("/admin", (c) => {
+	c.header("Content-Type", "text/html; charset=utf-8");
+	return c.body(ADMIN_PAGE_HTML);
+});
 
 const MIME: Record<string, string> = {
 	".html": "text/html",

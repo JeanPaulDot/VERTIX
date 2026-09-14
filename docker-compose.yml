@@ -6,6 +6,10 @@ services:
       - "127.0.0.1:1118:1118"
       - "127.0.0.1:1119:1119"
     volumes:
+      # Bind-mounted from the host: serves the bundled texture mods AND holds the
+      # writable vertix.db. The container runs as the `node` user (uid/gid 1000),
+      # so this directory must be owned by 1000:1000 on the host or the database
+      # opens read-only. Run once:  sudo chown -R 1000:1000 data
       - ./data:/app/data
     env_file: .env
     environment:
