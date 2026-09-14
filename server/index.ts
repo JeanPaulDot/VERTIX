@@ -9,7 +9,7 @@ import path from "path";
 import Stream from "node:stream";
 import { fileURLToPath } from "url";
 import { gameModes } from "core/src/gamemodes.ts";
-import { Room, rooms } from "./room.ts";
+import { Room, rooms, createPermanentRoom } from "./room.ts";
 import {
 	createRateLimiter,
 	createConnectionLimiter,
@@ -28,6 +28,7 @@ import {
 	findUserByUsername,
 	getDiscordConnectedUsers,
 	createBugReport,
+	getActiveBanFor,
 } from "./db.ts";
 import { validateSession } from "./session.ts";
 import { checkForNewUnlocks, getUserUnlockedItems } from "./unlocks.ts";
@@ -42,8 +43,15 @@ import {
 } from "./auth.ts";
 import { createOAuthRoutes, logOAuthConfig } from "./oauth.ts";
 import { createAdminRoutes, trackLobbyPlayer, untrackLobbyPlayer, logAdminConfig } from "./admin.ts";
-import { ADMIN_PAGE_HTML, ADMIN_PAGE_JS } from "./admin-page.ts";
 import { flushAnalytics } from "./analytics.ts";
+import { isMaintenanceEnabled } from "./server-ops.ts";
+import { writeServerStat, pruneServerStats } from "./db.ts";
+import {
+	initPresence,
+	presenceSnapshot,
+	stopPresence,
+	type PresenceEntry,
+} from "./presence.ts";
 import { log, formatDuration } from "./log.ts";
 import { defaultGenData } from "./maps.ts";
 
@@ -82,6 +90,8 @@ logAdminConfig();
 const createRoomLimiter = createRateLimiter(3, 60000);
 const profileLimiter = createRateLimiter(30, 60000);
 const leaderboardLimiter = createRateLimiter(20, 60000);
+// friends + clan detail: whole-directory scans that had no limiter at all
+const socialLimiter = createRateLimiter(40, 60000);
 // room browser + autoJoin poll: generous enough for a few open tabs, but still
 // stops an unauthenticated client from hammering the room list
 const roomBrowserLimiter = createRateLimiter(60, 60000);
@@ -136,17 +146,8 @@ function makeRoomCode(): string {
 	return code;
 }
 
-function createPermanentRoom(io: Server, code: string) {
-	const room = new Room(io, code);
-	room.isPermanent = true;
-	rooms.push(room);
-	room.game.newRound(parseInt(code.replace("DEV", ""), 10) || 0);
-	room.handleSocket();
-	return room;
-}
-
 for (let i = 0; i < 9; i++) {
-	createPermanentRoom(io, `DEV${i}`);
+	createPermanentRoom(io, `DEV${i}`, parseInt(`DEV${i}`.replace("DEV", ""), 10) || 0);
 }
 log.info(
 	"boot",
@@ -183,6 +184,46 @@ io.use(async (socket, next) => {
 	next();
 });
 
+// Ban gate for the lobby namespace. io.use only covers the root namespace —
+// room namespaces re-check in Room.handleSocket, which can also deliver the
+// reason through the kick protocol the client renders. Both checks are needed:
+// this one stops a banned player idling in the menu, that one stops them
+// joining a game.
+io.use((socket, next) => {
+	const forwarded = socket.handshake.headers["x-forwarded-for"];
+	const ip = getClientIp(
+		Array.isArray(forwarded) ? forwarded.join(",") : forwarded,
+		socket.handshake.address,
+	);
+	const ban = getActiveBanFor((socket as AuthenticatedSocket).userId ?? null, ip);
+	if (ban) {
+		return next(new Error(`You are banned: ${ban.reason}`));
+	}
+	next();
+});
+
+/**
+ * Everyone playing right now, for the social hub's presence list.
+ *
+ * Bots are excluded (they are not friends) and so is the sanitizer's "UNKNOWN"
+ * fallback. `account` is the signed-in identity, which is what presence is
+ * matched on — the display name is whatever the player typed.
+ */
+function buildPresenceList(): PresenceEntry[] {
+	return rooms.flatMap((r) =>
+		r.game.players
+			.filter((p) => !p.isBot && p.name !== "UNKNOWN")
+			.map((p) => ({
+				name: p.name,
+				account: p.accountName ?? null,
+				room: r.name,
+				mode: r.game.mode.code,
+				ranked: r.isPermanent,
+			})),
+	);
+}
+initPresence(io.of("/"), buildPresenceList);
+
 // the root ("lobby") namespace: the menu connects here before joining a game
 // room so quests/account/unlocks work in the menu. Reuses the same auth handlers
 // as room namespaces; the client swaps to a room socket on join.
@@ -203,6 +244,9 @@ io.on("connection", (socket: Socket) => {
 	// If session cookie validated, emit account data + owned cosmetics automatically
 	emitAccountStats(authSocket);
 	emitUnlocks(authSocket);
+	// the social hub opens straight onto a populated list rather than an empty
+	// one that fills in whenever the next player happens to join or leave
+	socket.emit("presence", presenceSnapshot());
 });
 
 const api = new Hono();
@@ -221,7 +265,9 @@ api.use(
 );
 
 api.route("/", createOAuthRoutes());
-api.route("/admin", createAdminRoutes());
+// the admin sub-app carries its own Variables typing for the actor; Hono's
+// route() signature doesn't accept a generically-typed sub-app on a plain app
+api.route("/admin", createAdminRoutes(io) as unknown as Hono);
 
 api.get("/getIP", (c) => {
 	if (!roomBrowserLimiter(getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip")))) {
@@ -259,6 +305,9 @@ api.post("/createRoom", async (c) => {
 	const clientIp = getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip"));
 	if (!createRoomLimiter(clientIp)) {
 		return c.json({ error: "Rate limit exceeded" }, 429);
+	}
+	if (isMaintenanceEnabled()) {
+		return c.json({ error: "Server is under maintenance" }, 503);
 	}
 	if (rooms.length >= MAX_ROOMS) {
 		return c.json({ error: "Server is at room capacity, try again later" }, 503);
@@ -328,28 +377,41 @@ api.get("/getRooms", (c) => {
 	return c.json(list);
 });
 
+// Six full-table scans, recomputed per request. Lifetime stats only move when a
+// round ends, so a few seconds of staleness is invisible to players and turns a
+// burst of tabs (or the social view polling) into one scan.
+const LEADERBOARD_CACHE_MS = 10_000;
+let leaderboardCache: { at: number; payload: unknown } | null = null;
+
+function buildLeaderboards() {
+	return {
+		rank: getLeaderboard("score", 50),
+		kdrThousand: getLeaderboard("kdr", 50, 1000),
+		kdrAny: getLeaderboard("kdr", 50),
+		kills: getLeaderboard("kills", 50),
+		clanRank: getClanLeaderboard("rank", 50),
+		clanKdr: getClanLeaderboard("kdr", 50),
+	};
+}
+
 api.get("/getLbs", (c) => {
-	// six full-table scans with no cache — cheap for us to serve, cheaper still
-	// for someone to loop, so it needs a limiter like every other scan route
 	if (!leaderboardLimiter(getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip")))) {
 		return c.json({ error: "Rate limit exceeded" }, 429);
 	}
-	const rank = getLeaderboard("score", 50);
-	const kdrThousand = getLeaderboard("kdr", 50, 1000);
-	const kdrAny = getLeaderboard("kdr", 50);
-	const kills = getLeaderboard("kills", 50);
-
-	return c.json({
-		rank,
-		kdrThousand,
-		kdrAny,
-		kills,
-		clanRank: getClanLeaderboard("rank", 50),
-		clanKdr: getClanLeaderboard("kdr", 50),
-	});
+	const now = Date.now();
+	if (!leaderboardCache || now - leaderboardCache.at > LEADERBOARD_CACHE_MS) {
+		leaderboardCache = { at: now, payload: buildLeaderboards() };
+	}
+	return c.json(leaderboardCache.payload);
 });
 
+const FRIENDS_PAGE_SIZE = 50;
+const FRIENDS_MAX_PAGE_SIZE = 100;
+
 api.get("/friends", async (c) => {
+	if (!socialLimiter(getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip")))) {
+		return c.json({ error: "Rate limit exceeded" }, 429);
+	}
 	// players in rooms right now (humans only — bots aren't friends)
 	const online = rooms.flatMap((r) =>
 		r.game.players
@@ -358,6 +420,9 @@ api.get("/friends", async (c) => {
 				name: p.name,
 				room: r.name,
 				mode: r.game.mode.code,
+				// present only for signed-in players; the display name is whatever
+				// they typed and is not proof of identity
+				account: p.accountName ?? null,
 			})),
 	);
 
@@ -365,23 +430,53 @@ api.get("/friends", async (c) => {
 	// themselves — that's the "friend graph" this feature is built around
 	const session = await validateSession(c.req.header("Cookie"));
 	const self = session ? findUserById(session.userId) : undefined;
-	let discord: { username: string; discordName: string; avatar: string; online: boolean }[] | null =
-		null;
+	let discord:
+		| { username: string; discordName: string; avatar: string; online: boolean }[]
+		| null = null;
+	let discordTotal = 0;
+	const limit = Math.min(
+		FRIENDS_MAX_PAGE_SIZE,
+		Math.max(1, Number.parseInt(c.req.query("limit") ?? "", 10) || FRIENDS_PAGE_SIZE),
+	);
+	const page = Math.max(1, Number.parseInt(c.req.query("page") ?? "", 10) || 1);
+	const search = (c.req.query("q") ?? "").trim().toLowerCase();
+
 	if (self?.discord_id) {
-		const onlineNames = new Set(online.map((p) => p.name));
-		discord = getDiscordConnectedUsers()
-			.filter((u) => u.username !== self.username)
-			.map((u) => ({
-				username: u.username,
-				discordName: u.discord_username,
-				avatar: u.discord_avatar,
-				online: onlineNames.has(u.username),
-			}));
+		// Online is matched on the *account* behind each player, not the display
+		// name. Name matching let any guest type someone's username into the name
+		// box and show up as them in their friends' lists.
+		const onlineAccounts = new Set(
+			online.map((p) => p.account).filter((name): name is string => !!name),
+		);
+		const directory = getDiscordConnectedUsers().filter(
+			(u) =>
+				u.username !== self.username &&
+				(!search ||
+					u.username.toLowerCase().includes(search) ||
+					(u.discord_username ?? "").toLowerCase().includes(search)),
+		);
+		discordTotal = directory.length;
+		// online friends first, so page 1 is the useful one
+		directory.sort((a, b) => {
+			const diff =
+				Number(onlineAccounts.has(b.username)) - Number(onlineAccounts.has(a.username));
+			return diff !== 0 ? diff : a.username.localeCompare(b.username);
+		});
+		discord = directory.slice((page - 1) * limit, page * limit).map((u) => ({
+			username: u.username,
+			discordName: u.discord_username,
+			avatar: u.discord_avatar,
+			online: onlineAccounts.has(u.username),
+		}));
 	}
 
 	return c.json({
 		online,
 		discord,
+		discordTotal,
+		page,
+		limit,
+		hasMore: discord !== null && page * limit < discordTotal,
 		selfDiscordConnected: !!self?.discord_id,
 		loggedIn: !!session,
 	});
@@ -397,6 +492,9 @@ api.get("/clans", (c) => {
 });
 
 api.get("/clan/:name", (c) => {
+	if (!socialLimiter(getClientIp(c.req.header("x-forwarded-for"), c.req.header("x-real-ip")))) {
+		return c.json({ error: "Rate limit exceeded" }, 429);
+	}
 	const clan = findClanByName(c.req.param("name"));
 	if (!clan) return c.json({ error: "Clan not found" }, 404);
 	const stats = getClanStats(clan.id);
@@ -478,20 +576,9 @@ app.use(
 );
 app.route("/api", api);
 
-// Admin dashboard page. The HTML is public (it does nothing without the token);
-// every /api/admin/* call behind it is gated on ADMIN_TOKEN.
-app.get("/admin", (c) => {
-	c.header("Content-Type", "text/html; charset=utf-8");
-	return c.body(ADMIN_PAGE_HTML);
-});
-
-// The admin page's script lives in a separate file because the server CSP is
-// `script-src 'self'`, which blocks inline <script> tags.
-app.get("/admin.js", (c) => {
-	c.header("Content-Type", "application/javascript; charset=utf-8");
-	c.header("Cache-Control", "no-store");
-	return c.body(ADMIN_PAGE_JS);
-});
+// The admin dashboard is a built Svelte page (core/admin.html → dist/admin.html)
+// served by the static catch-all below, same as the game itself. Its API calls
+// under /api/admin/* are gated in admin.ts.
 
 const MIME: Record<string, string> = {
 	".html": "text/html",
@@ -626,9 +713,20 @@ if (STATUS_INTERVAL_MS > 0) {
 	}, STATUS_INTERVAL_MS).unref();
 }
 
+// Concurrency sampler: one row per minute for the admin panel's activity chart.
+// A synchronous write once a minute is negligible; the prune keeps the table
+// bounded at ~30 days (43k rows).
+setInterval(() => {
+	const players = rooms.flatMap((r) => r.game.players);
+	const humans = players.filter((p) => !p.isBot).length;
+	writeServerStat(Date.now(), humans, players.length - humans, rooms.length);
+	pruneServerStats(30 * 24 * 60 * 60_000);
+}, 60_000).unref();
+
 function shutdown(signal: string) {
 	log.info("boot", `${signal} received — shutting down after ${formatDuration(Date.now() - bootStartedAt)}`);
 	flushAnalytics();
+	stopPresence();
 	server.close();
 	io.close();
 	process.exit(0);

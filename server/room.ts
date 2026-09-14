@@ -19,6 +19,7 @@ import {
 } from "core/src/utils.ts";
 import {
 	BOT_CLASS_POOL,
+	BOT_BLAST_SAFETY_MARGIN,
 	BOT_PREFERRED_RANGE,
 	type BotState,
 	createBotState,
@@ -27,6 +28,7 @@ import {
 } from "./bots.ts";
 import { Game } from "./game.ts";
 import { log, formatDuration } from "./log.ts";
+import { notifyPresenceChanged } from "./presence.ts";
 import {
 	sanitizeName,
 	isValidClassIndex,
@@ -34,6 +36,7 @@ import {
 	isValidHatIndex,
 	isValidShirtIndex,
 	isValidCamoIndex,
+	isValidWeaponIndex,
 	isValidModeVoteIndex,
 	isWithinShootDistance,
 	sanitizeChatMessage,
@@ -51,9 +54,13 @@ import {
 	getUserStats,
 	hasUnlock,
 	grantCrate,
+	getActiveBanFor,
+	getActiveMuteFor,
+	getUserRole,
 } from "./db.ts";
 import { checkForNewUnlocks } from "./unlocks.ts";
-import { trackSessionStart, trackSessionEnd } from "./analytics.ts";
+import { isMaintenanceEnabled } from "./server-ops.ts";
+import { trackSessionStart, trackSessionEnd, trackChat } from "./analytics.ts";
 import { incrementQuestProgressFromStats, getQuestProgressSnapshot } from "./quests.ts";
 import {
 	attachSocketSession,
@@ -64,6 +71,9 @@ import {
 	setupAuthHandlers,
 	type AuthenticatedSocket,
 } from "./auth.ts";
+
+/** numbers per player in an "rsd" position packet: [7, index, x, y, angle, jumpY, isn] */
+const POSITION_FIELDS_PER_PLAYER = 7;
 
 const chatRateLimiter = createRateLimiter(5, 1000);
 // generous min-interval throttles for per-frame input: these only guard
@@ -76,6 +86,10 @@ const shootRateLimiter = createIntervalLimiter(50);
 // resync requests are rare in normal play (one per missed "add"), so a low cap is
 // plenty and stops a client using it to dump the roster in a loop
 const resyncRateLimiter = createRateLimiter(20, 1000);
+// "!sync" in chat rides the chat limiter (5/s), but one message turned into a
+// full position dump for every player in the room — cheap to send, expensive to
+// fan out. It gets its own budget and now answers only the asker.
+const chatSyncRateLimiter = createRateLimiter(2, 5_000);
 // Handlers that write to the DB, allocate a timer, or fan a message out to the
 // whole room. None of these are emitted rapidly in normal play, but every one
 // of them was an unmetered amplification primitive.
@@ -108,6 +122,10 @@ const FIRE_RATE_TOLERANCE = 0.85;
 const LOOTCRATE_POINTS = 100;
 const MAX_ACTIVE_LOOT = 3;
 const HARDPOINT_POINTS = 10;
+/** how often the hardpoint capture state is evaluated */
+const HARDPOINT_TICK_MS = 200;
+/** wall-clock time a player must hold the point for each award */
+const HARDPOINT_CAPTURE_MS = 1000;
 const ZONE_WAR_POINTS = 100;
 
 const AUTO_CLOSE_EMPTY_MS = 60000;
@@ -161,6 +179,24 @@ function secretMatches(supplied: unknown, expected: string): boolean {
 	return timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
 }
 
+/**
+ * Strips the server-only fields before a Player goes out over the wire. `socketId`
+ * is the address `io.to()` targets and `userId`/`accountName` are account identity
+ * — none of it is any peer's business. The "ftc" resync handler already did this
+ * for socketId; gameSetup and "add" did not.
+ */
+function withoutServerFields(player: Player) {
+	const {
+		socketId: _socketId,
+		userId: _userId,
+		accountName: _accountName,
+		ip: _ip,
+		sessionStartedAt: _sessionStartedAt,
+		...safe
+	} = player;
+	return safe;
+}
+
 type WeaponRuntime = { ammo: number; lastShot: number; reloadUntil: number };
 
 export class Room {
@@ -173,6 +209,7 @@ export class Room {
 	private emptySince: number | null = Date.now();
 	private bots = new Map<Player, BotState>();
 	private lastBotStepAt = 0;
+	private lastHardpointTickAt = 0;
 	// per-player wall-clock movement allowance; see consumeMovementBudget
 	private movementBudget = new WeakMap<
 		Player,
@@ -182,6 +219,23 @@ export class Room {
 	// any of them running pins the whole Room (game, tiles, bullet pool) in memory
 	// and lets the empty-check re-close an already-closed room every 5s forever.
 	private intervals: ReturnType<typeof setInterval>[] = [];
+	/** reused position-broadcast scratch buffer; see broadcastPositions */
+	private positionBuffer: number[] = [];
+	/**
+	 * Each player's camo pick, keyed by catalogue weapon index. Weapons are cloned
+	 * per player now, and applyClassLoadout rebuilds those clones on every spawn
+	 * and round transition — so the choice has to live outside them or it would be
+	 * reset every time the player respawned.
+	 */
+	private camoChoices = new WeakMap<Player, Map<number, number>>();
+	/**
+	 * Earliest time this player may fire *anything*, in ms.
+	 *
+	 * The per-slot gate below is not enough on its own: each weapon tracks its own
+	 * lastShot, so alternating two weapons let a player fire both at full rate and
+	 * double their effective DPS. This carries the cooldown across the switch.
+	 */
+	private nextShotAt = new WeakMap<Player, number>();
 	private isClosed = false;
 	cosmetics = {
 		hats,
@@ -212,6 +266,54 @@ export class Room {
 				this.broadcastPositions();
 			}, POSITION_TICK_MS),
 		);
+		this.intervals.push(
+			setInterval(() => this.tickHardpoints(), HARDPOINT_TICK_MS),
+		);
+	}
+
+	/**
+	 * Hardpoint capture ticks on the room's own clock.
+	 *
+	 * This used to run inside checkSpecialTiles, i.e. once per received movement
+	 * packet, decrementing the countdown by the client-supplied `player.delta`.
+	 * That made capture rate a function of the client: standing still on the point
+	 * without sending movement stopped scoring altogether, and a client reporting
+	 * small deltas captured more slowly than one reporting large ones.
+	 */
+	private tickHardpoints() {
+		if (this.game.mode.code !== "hp") return;
+		const now = Date.now();
+		const elapsed =
+			this.lastHardpointTickAt === 0
+				? HARDPOINT_TICK_MS
+				: Math.min(now - this.lastHardpointTickAt, HARDPOINT_CAPTURE_MS);
+		this.lastHardpointTickAt = now;
+
+		for (const player of this.game.players) {
+			if (player.dead) continue;
+			if (player.scoreCountdown > 0) {
+				player.scoreCountdown -= elapsed;
+				continue;
+			}
+			player.isInHardpoint = false;
+			for (const tl of this.game.scoreTiles) {
+				if (
+					!dotInRect(player.x, player.y, tl.x, tl.y, tl.scale, tl.scale) ||
+					tl.objTeam === player.team
+				) {
+					continue;
+				}
+				player.scoreCountdown = HARDPOINT_CAPTURE_MS;
+				player.isInHardpoint = true;
+				this.updateScore(HARDPOINT_POINTS, player);
+				this.io.emit("upd", {
+					i: player.index,
+					s: player.score,
+					goa: player.totalGoals,
+				});
+			}
+			if (!player.isInHardpoint) player.hardpointScore = 0;
+		}
 	}
 
 	/** "2/8" style occupancy, humans only — bots yield their slot to real players. */
@@ -279,6 +381,126 @@ export class Room {
 		if (idx > -1) rooms.splice(idx, 1);
 	}
 
+	// --- admin surface ---------------------------------------------------------
+	//
+	// The panel in admin.ts drives the room through these methods instead of
+	// poking at game state directly: every mutation goes through code that
+	// already knows the room's invariants (clamping, broadcast shapes, and the
+	// isClosed guards that stop a closed room from emitting onto a dead
+	// namespace). All of them return false / no-op when the room or player is
+	// gone, so a stale admin panel never throws.
+
+	findPlayerByIndex(index: number): Player | undefined {
+		return this.game.players.find((p) => p.index === index);
+	}
+
+	/** Kick one player with a reason they see. Returns false if the index is gone. */
+	adminKickPlayer(index: number, reason: string): boolean {
+		const target = this.findPlayerByIndex(index);
+		if (!target?.socketId) return false;
+		const socket = this.io.sockets.get(target.socketId);
+		if (!socket) return false;
+		socket.emit("kick", reason);
+		socket.disconnect(true);
+		return true;
+	}
+
+	adminSetTeam(index: number, team: "red" | "blue"): boolean {
+		const target = this.findPlayerByIndex(index);
+		if (!target || (team !== "red" && team !== "blue")) return false;
+		target.team = team;
+		// a fresh "add" is the established way to push an updated player record;
+		// the client merges it by index and keeps its local render state
+		this.io.emit("add", JSON.stringify(withoutServerFields(target)));
+		return true;
+	}
+
+	/** Shared spawn placement for admin respawn and boss toggling. */
+	private placePlayerAtSpawn(player: Player): void {
+		player.onScreen = true;
+		player.angle = 0;
+		const spawn = this.game.getSpawn(player);
+		player.x = spawn.x;
+		player.y = spawn.y;
+		player.dead = false;
+		player.isSpawnProtected = true;
+		player.isInHardpoint = false;
+		player.damageSources = {};
+		setTimeout(() => {
+			if (this.isClosed) return;
+			player.isSpawnProtected = false;
+			this.io.emit("upd", { i: player.index, sp: false });
+		}, SPAWN_PROTECTION_DURATION);
+		this.io.emit("add", JSON.stringify(withoutServerFields(player)));
+		this.updateScore(0, player);
+	}
+
+	adminRespawnPlayer(index: number): boolean {
+		const target = this.findPlayerByIndex(index);
+		if (!target) return false;
+		this.applyClassLoadout(target);
+		this.placePlayerAtSpawn(target);
+		return true;
+	}
+
+	adminAdjustScore(index: number, delta: number): boolean {
+		const target = this.findPlayerByIndex(index);
+		if (!target || !Number.isFinite(delta)) return false;
+		this.updateScore(Math.trunc(delta), target);
+		return true;
+	}
+
+	/** Force-set (or clear) boss status in any mode, respawning into the role. */
+	adminSetBoss(index: number, value: boolean): boolean {
+		const target = this.findPlayerByIndex(index);
+		if (!target) return false;
+		if (value) {
+			// applyClassLoadout resets isBoss and only re-sets it in boss mode, so the
+			// flag is applied *after* the loadout rather than through it
+			target.classIndex = 10;
+			this.applyClassLoadout(target);
+			target.isBoss = true;
+			target.team = "blue";
+		} else {
+			target.isBoss = false;
+			target.classIndex = 0;
+			this.applyClassLoadout(target);
+		}
+		this.placePlayerAtSpawn(target);
+		return true;
+	}
+
+	adminRestartRound(): void {
+		if (this.isClosed) return;
+		const modeIndex = gameModes.findIndex((m) => m.code === this.game.mode.code);
+		this.game.newRound(modeIndex < 0 ? 0 : modeIndex);
+		this.applyLoadoutsToAll();
+		notifyPresenceChanged();
+		// mirror the round-transition handshake so every client respawns cleanly
+		for (const pl of this.game.players) {
+			if (!pl.socketId) continue;
+			this.io.to(pl.socketId).emit(
+				"welcome",
+				{ id: pl.id, room: pl.room, name: pl.name, classIndex: pl.classIndex },
+				true,
+			);
+		}
+		this.broadcastLeaderboard();
+		this.io.emit("5", "Round restarted by an admin");
+	}
+
+	/** Add (+1) or remove (-1) one bot. Returns the new bot count. */
+	adminAdjustBots(delta: number): number {
+		if (this.isClosed) return this.bots.size;
+		if (delta > 0 && this.game.players.length < this.game.maxPlayers) {
+			this.spawnBot();
+		} else if (delta < 0 && this.bots.size > 0) {
+			const last = [...this.bots.keys()].pop();
+			if (last) this.removeBot(last);
+		}
+		return this.bots.size;
+	}
+
 	startCheckEmptyInterval() {
 		this.intervals.push(setInterval(() => {
 			if (this.isPermanent || this.game.players.length > 0) {
@@ -322,6 +544,12 @@ export class Room {
 			// — this is the only namespace the game client ever actually connects to
 			const authSocket = socket as AuthenticatedSocket;
 			await attachSocketSession(authSocket);
+			// maintenance locks new joins; mods/admins can still get in to verify
+			if (isMaintenanceEnabled() && getUserRole(authSocket.userId ?? -1) === "player") {
+				socket.emit("kick", "Server is under maintenance. Try again soon.");
+				socket.disconnect(true);
+				return;
+			}
 			setupAuthHandlers(authSocket);
 			recordLoginForSocket(authSocket);
 			emitAccountStats(authSocket);
@@ -335,6 +563,17 @@ export class Room {
 			);
 			const sessionId = crypto.randomUUID();
 			const sessionStartedAt = Date.now();
+
+			// bans block the join itself — account first, then IP — through the same
+			// kick protocol the client already renders a reason for
+			const ban = getActiveBanFor(authSocket.userId ?? null, clientIp);
+			if (ban) {
+				log.info("moderation", `banned join (${ban.kind}:${ban.value}) from ${clientIp} -> ${this.name}`);
+				socket.emit("kick", `You are banned: ${ban.reason}`);
+				socket.disconnect(true);
+				return;
+			}
+
 			trackSessionStart({
 				id: sessionId,
 				userId: authSocket.userId ?? null,
@@ -342,11 +581,18 @@ export class Room {
 				ip: clientIp,
 				userAgent: (socket.handshake.headers["user-agent"] ?? "").substring(0, 200),
 				room: this.name,
+				mode: this.game.mode.code,
 				startedAt: sessionStartedAt,
 			});
 
 			let player = this.game.newPlayer();
 			player.socketId = socket.id;
+			// server-only identity: presence, moderation and the admin panel all need
+			// to know *which account* this is, not just the display name they typed
+			player.userId = authSocket.userId ?? null;
+			player.accountName = authSocket.username ?? null;
+			player.ip = clientIp;
+			player.sessionStartedAt = sessionStartedAt;
 			let hasLoggedJoin = false;
 			let joinedAt = 0;
 			if (authSocket.userId) {
@@ -373,11 +619,10 @@ export class Room {
 			);
 			socket.emit("updHt", hats.length, this.cosmetics.hats);
 			socket.emit("updShrt", shirts.length, this.cosmetics.shirts);
-			socket.emit(
-				"updCmo",
-				camos.length,
-				this.game.weapons.map(() => this.cosmetics.camos),
-			);
+			// One catalogue, not one per weapon. This used to serialise the same
+			// 133-entry list 13 times (once per weapon) on every connect, and the
+			// client only ever read index 0 of the result.
+			socket.emit("updCmo", camos.length, this.cosmetics.camos);
 			emitUnlocks(authSocket);
 
 			socket.on("cHat", (id) => {
@@ -397,7 +642,11 @@ export class Room {
 			socket.on("cCamo", (data) => {
 				if (!cosmeticRateLimiter(socket.id)) return;
 				if (!data || typeof data !== "object") return;
-				const wep = this.game.weapons[data.weaponID];
+				// weaponID is the *catalogue* index the loadout picked (class
+				// weaponIndexes), not a slot — resolve it against the player's own
+				// weapons so a camo change re-skins their copy and nobody else's.
+				if (!isValidWeaponIndex(data.weaponID, this.game.weapons.length)) return;
+				const wep = player.weapons.find((w) => w.weaponIndex === data.weaponID);
 				if (!wep || !isValidCamoIndex(data.camoID)) return;
 				// camoID 0 means "no camo" (client default) — always allowed, no ownership needed
 				if (
@@ -406,6 +655,12 @@ export class Room {
 					hasUnlock(authSocket.userId, "camo", data.camoID)
 				) {
 					wep.camo = data.camoID - 1;
+					let choices = this.camoChoices.get(player);
+					if (!choices) {
+						choices = new Map();
+						this.camoChoices.set(player, choices);
+					}
+					choices.set(data.weaponID, wep.camo);
 				}
 			});
 			socket.on("cSpray", (id) => {
@@ -419,7 +674,7 @@ export class Room {
 				}
 			});
 
-			socket.on("gotit", (client, init, currentTime) => {
+			socket.on("gotit", (client, init) => {
 				// each call ends in a full gameSetup JSON.stringify (whole map + roster)
 				// broadcast to the room, so it needs a floor between calls
 				if (!joinRateLimiter(socket.id)) return;
@@ -437,6 +692,8 @@ export class Room {
 					joinedAt = Date.now();
 					const who = authSocket.username ? `${player.name}` : `${player.name} (guest)`;
 					log.info("join", `${who} (${clientIp}) -> ${this.describe()} ${this.isPermanent ? "" : "[private]"}`.trim());
+					// tell everyone sitting in the menu that someone just started playing
+					notifyPresenceChanged();
 				}
 
 				player.onScreen = true;
@@ -449,6 +706,7 @@ export class Room {
 				player.isInHardpoint = false;
 				player.damageSources = {};
 				setTimeout(() => {
+					if (this.isClosed) return;
 					player.isSpawnProtected = false;
 					this.io.emit("upd", { i: player.index, sp: false });
 				}, SPAWN_PROTECTION_DURATION);
@@ -461,8 +719,8 @@ export class Room {
 					viewMult: 1,
 					tileScale: this.game.tileScale,
 
-					usersInRoom: this.game.players,
-					you: player,
+					usersInRoom: this.game.players.map(withoutServerFields),
+					you: withoutServerFields(player),
 				};
 
 				socket.emit("gameSetup", JSON.stringify(gameSetup), true, true);
@@ -474,7 +732,7 @@ export class Room {
 						: this.game.mode.desc1;
 					socket.emit("6", this.game.mode.name, gameModeDesc, 1.25);
 				}
-				this.io.emit("add", JSON.stringify(player));
+				this.io.emit("add", JSON.stringify(withoutServerFields(player)));
 				socket.emit(
 					"rsd",
 					this.game.players.flatMap((pl) => [
@@ -526,6 +784,7 @@ export class Room {
 				if (this.game.players.length === 0) {
 					this.emptySince = Date.now();
 				}
+				if (hasLoggedJoin) notifyPresenceChanged();
 				// only refresh the board — running updateScore here re-evaluated the
 				// win condition against the *departing* player's score and could end
 				// the round in their name after they'd already left
@@ -546,6 +805,7 @@ export class Room {
 				const currentWeaponIndex = player.currentWeapon;
 				this.startReload(player, currentWeaponIndex);
 				setTimeout(() => {
+					if (this.isClosed) return;
 					socket.emit("r", currentWeaponIndex);
 				}, currentWeapon.reloadSpeed ?? 0);
 			});
@@ -566,8 +826,17 @@ export class Room {
 			socket.on("cht", (msg, type) => {
 				if (!chatRateLimiter(socket.id)) return;
 				msg = sanitizeChatMessage(msg);
+				// mutes gate chat only — the player can still play. Checked before the
+				// !sync branch so a muted player can't use it as a free side channel.
+				const mute = getActiveMuteFor(player.userId ?? null, player.ip ?? null);
+				if (mute) {
+					socket.emit("cht", [-1, `You are muted: ${mute.reason}`]);
+					return;
+				}
 				if (msg.includes("!sync")) {
-					this.io.emit(
+					if (!chatSyncRateLimiter(socket.id)) return;
+					// answer the asker only: this is a resync request, not news
+					socket.emit(
 						"rsd",
 						this.game.players.flatMap((pl) => [
 							5,
@@ -584,6 +853,15 @@ export class Room {
 					"chat",
 					`${this.name}${type === "TEAM" ? " (team)" : ""} ${player.name}: ${msg}`,
 				);
+				// bounded moderation history (pruned to 7 days by the analytics flush)
+				trackChat({
+					room: this.name,
+					userId: player.userId ?? null,
+					username: player.name,
+					ip: player.ip ?? "",
+					message: msg,
+					at: Date.now(),
+				});
 				if (type === "TEAM" && this.game.mode.teams) {
 					for (let pl of this.game.players) {
 						if (pl.team === player.team && pl.socketId) {
@@ -703,13 +981,11 @@ export class Room {
 				if (!resyncRateLimiter(socket.id)) return;
 				if (typeof index !== "number" || !Number.isInteger(index)) return;
 				const missing = this.game.players.find((pl) => pl.index === index);
-				// socketId is server bookkeeping; peers have no use for it
 				if (missing) {
-					const { socketId: _socketId, ...safe } = missing as Player & { socketId?: string };
-					socket.emit("add", JSON.stringify(safe));
+					socket.emit("add", JSON.stringify(withoutServerFields(missing)));
 				}
 			});
-			socket.on("create", (lobby) => {});
+
 		});
 	}
 
@@ -809,14 +1085,19 @@ export class Room {
 			runtime = this.weaponRuntime.get(player);
 		}
 		const slot = runtime?.[player.currentWeapon];
-		if (!slot) return true;
+		// fail closed: a missing runtime slot used to return true, which handed the
+		// caller a free shot with no fire-rate, ammo or reload check at all
+		if (!slot) return false;
 
 		const now = Date.now();
 		if (now < slot.reloadUntil) return false;
 		if (slot.ammo <= 0) return false;
 		if (now - slot.lastShot < weapon.fireRate * FIRE_RATE_TOLERANCE) return false;
+		// and the cross-weapon gate, so switching weapons isn't a free reset
+		if (now < (this.nextShotAt.get(player) ?? 0)) return false;
 
 		slot.lastShot = now;
+		this.nextShotAt.set(player, now + weapon.fireRate * FIRE_RATE_TOLERANCE);
 		slot.ammo--;
 		if (slot.ammo <= 0) this.startReload(player, player.currentWeapon);
 		return true;
@@ -905,13 +1186,13 @@ export class Room {
 				((player.targetF + Math.PI * 2) % (Math.PI * 2)) * (180 / Math.PI) +
 				90;
 
-			//TODO
-			if (space === 1) {
+			// Only announce a jump that actually starts one. Emitting before the
+			// jumpY check fanned a held jump key out to the whole room on every
+			// movement packet — up to 250 a second, per player.
+			if (space === 1 && player.jumpY <= 0) {
+				player.jumpDelta = player.jumpStrength;
+				player.jumpY = player.jumpDelta;
 				this.io.emit("jum", player.index);
-				if (player.jumpY <= 0) {
-					player.jumpDelta = player.jumpStrength;
-					player.jumpY = player.jumpDelta;
-				}
 			}
 			if (player.jumpCountdown > 0) {
 				player.jumpCountdown -= delta;
@@ -963,10 +1244,12 @@ export class Room {
 	private broadcastPositions() {
 		const players = this.game.players;
 		if (players.length === 0) return;
-		const base: number[] = [];
-		const isnSlot = new Map<Player, number>();
+		// Reused across ticks. This runs 62.5 times a second in every room, and the
+		// array plus a Map<Player, number> used to be rebuilt each time purely to
+		// remember a slot offset that is just i * FIELDS_PER_PLAYER + 6.
+		const base = this.positionBuffer;
+		base.length = 0;
 		for (const pl of players) {
-			isnSlot.set(pl, base.length + 6);
 			// Slot 5 used to carry nameYOffset, which is permanently 0 here — it's a
 			// client-side value computed against the local tile grid, so sending it
 			// only overwrote the client's own correct figure with 0. jumpY is what
@@ -974,10 +1257,13 @@ export class Room {
 			// was invisible to everyone else.
 			base.push(7, pl.index, pl.x, pl.y, pl.angle, pl.jumpY, 0);
 		}
-		for (const pl of players) {
+		for (let i = 0; i < players.length; i++) {
+			const pl = players[i];
 			if (!pl.socketId) continue; // bots have no socket
+			// each recipient sees their own last-applied input number in their slot,
+			// and 0 in everyone else's — the client parses its own slot differently
 			const view = base.slice();
-			view[isnSlot.get(pl)!] = pl.isn ?? 0;
+			view[i * POSITION_FIELDS_PER_PLAYER + 6] = pl.isn ?? 0;
 			this.io.to(pl.socketId).emit("rsd", view);
 		}
 	}
@@ -999,9 +1285,23 @@ export class Room {
 		}
 		player.currentWeapon = 0;
 		const currentClass = characterClasses[player.classIndex];
-		player.weapons = currentClass.weaponIndexes.map(
-			(i) => this.game.weapons[i],
+		// A copy per player, not a reference into the room-wide array. Sharing the
+		// weapon objects meant `spreadIndex` was one cursor for the whole room (so
+		// any player reloading reset everyone's spread pattern) and a camo pick
+		// re-skinned that weapon for every other player holding it. Ammo, fire rate
+		// and reload had already been moved out to Room.weaponRuntime for the same
+		// reason; this finishes the job for the fields still on the weapon.
+		player.weapons = currentClass.weaponIndexes.map((i) =>
+			structuredClone(this.game.weapons[i]),
 		);
+		// the clones come from the pristine template, so re-apply this player's camo
+		const camoChoices = this.camoChoices.get(player);
+		if (camoChoices) {
+			for (const wep of player.weapons) {
+				const camo = camoChoices.get(wep.weaponIndex);
+				if (camo !== undefined) wep.camo = camo;
+			}
+		}
 		player.health = player.maxHealth =
 			currentClass.maxHealth * this.game.mults.health;
 		player.height = currentClass.height;
@@ -1068,10 +1368,11 @@ export class Room {
 		bot.damageSources = {};
 		bot.firstReceive = false;
 		setTimeout(() => {
+			if (this.isClosed) return;
 			bot.isSpawnProtected = false;
 			this.io.emit("upd", { i: bot.index, sp: false });
 		}, SPAWN_PROTECTION_DURATION);
-		this.io.emit("add", JSON.stringify(bot));
+		this.io.emit("add", JSON.stringify(withoutServerFields(bot)));
 		this.updateScore(0, bot);
 	}
 
@@ -1207,7 +1508,17 @@ export class Room {
 
 		// movement: close in / back off around the class's preferred range,
 		// strafe perpendicular when in the sweet spot
-		const preferred = BOT_PREFERRED_RANGE[bot.classIndex] ?? 350;
+		const equipped = getCurrentWeapon(bot);
+		// An explosive that hurts the shooter sets its own floor: never prefer a
+		// range where the bot is standing inside its own blast.
+		const blastFloor =
+			equipped?.selfDamage && equipped.blastRadius
+				? equipped.blastRadius * BOT_BLAST_SAFETY_MARGIN
+				: 0;
+		const preferred = Math.max(
+			BOT_PREFERRED_RANGE[bot.classIndex] ?? 350,
+			blastFloor / 0.5, // so the retreat threshold (preferred * 0.5) clears it
+		);
 		const dx = (target.x - bot.x) / (dist || 1);
 		const dy = (target.y - bot.y) / (dist || 1);
 		let hdt: number;
@@ -1256,10 +1567,13 @@ export class Room {
 		if (Math.random() < state.difficulty.strafeChance * 0.06) state.jump = 1;
 
 		// fire control
-		const weapon = getCurrentWeapon(bot);
+		const weapon = equipped;
 		if (!weapon) return;
 		if (now - state.targetAcquiredAt < state.difficulty.reactionDelayMs) return;
 		if (dist > BOT_MAX_FIRE_RANGE) return;
+		// hold fire rather than suicide: the movement band above pulls the bot back
+		// out, and it shoots as soon as it is clear of its own splash
+		if (blastFloor > 0 && dist < blastFloor) return;
 		// fireDiscipline only paces the bot *below* the weapon's cap; ammo and the
 		// cap itself are enforced by applyShootInput, the same as for real players
 		// (the bot used to simulate its own magazine, which would now double up)
@@ -1304,7 +1618,12 @@ export class Room {
 
 		const previousScore = getUserStats(userId)?.score ?? 0;
 		saveRoundStats(userId, roundStats);
-		incrementQuestProgressFromStats(userId, { ...roundStats, won });
+		// the mode is what gates mode-specific quests ("Win 2 rounds of Hardpoint")
+		incrementQuestProgressFromStats(userId, {
+			...roundStats,
+			won,
+			mode: this.game.mode.code,
+		});
 
 		const stats = getUserStats(userId);
 		const newlyUnlocked = stats ? checkForNewUnlocks(userId, stats.score) : [];
@@ -1386,7 +1705,15 @@ export class Room {
 			);
 			this.io.emit("7", source.team, this.game.modeVotes, false);
 			let timeLeft = 15;
-			let timer = setInterval(() => {
+			// Tracked like every other interval this room owns: close() clears
+			// this.intervals, and this one used to be left out entirely, so a room
+			// closed during the countdown kept ticking forever on a dead namespace
+			// and kept the whole Room (map, bullet pool, players) reachable.
+			const timer = setInterval(() => {
+				if (this.isClosed) {
+					clearInterval(timer);
+					return;
+				}
 				if (timeLeft >= 0) {
 					this.io.emit("8", timeLeft--);
 				} else {
@@ -1402,6 +1729,8 @@ export class Room {
 					}
 					this.game.newRound(sorted[0].indx);
 					this.applyLoadoutsToAll();
+					// the mode label in the presence list rotates with the round
+					notifyPresenceChanged();
 					this.persistedThisRound = new WeakSet();
 					log.info(
 						"round",
@@ -1425,12 +1754,19 @@ export class Room {
 					clearInterval(timer);
 				}
 			}, 1000);
+			this.intervals.push(timer);
 		}
 	}
 
 	updateBullet(bullet: Projectile, player: Player, dir: number) {
 		const bulletStartedAt = Date.now();
 		const tick = () => {
+			// a bullet still in flight when the room closes would otherwise keep
+			// rescheduling itself and emitting into a dead namespace
+			if (this.isClosed) {
+				bullet.deactivate();
+				return;
+			}
 			if (
 				!bullet.active &&
 				(bullet.explodeOnDeath || bullet.collidesWithExplosiveClutter)
@@ -1538,8 +1874,13 @@ export class Room {
 	}
 
 	handleAssist(source: Player, dest: Player, assistDamage: number) {
+		// Self-damage (rocket/grenade splash) can consume the whole health pool, which
+		// made this divisor 0 and handed out Infinity score — poisoning the player's
+		// score, the team leaderboard and the "lb >= 100" round-end test. handleKill
+		// already guards the same expression; mirror it here.
 		const maxHealthMinusSelfDamage =
 			dest.maxHealth - (dest.damageSources[dest.index] ?? 0);
+		if (maxHealthMinusSelfDamage <= 0) return;
 		const scored =
 			Math.round((100 * assistDamage) / maxHealthMinusSelfDamage) *
 			this.game.mode.killScoreMult;
@@ -1613,9 +1954,11 @@ export class Room {
 			}
 		}
 
-		for (const pl of this.game.players) {
-			pl.damageSources[dest.index] = 0;
-		}
+		// Clear the victim's own ledger (who damaged *them*), matching what respawn
+		// does. The previous loop cleared the opposite direction — every other
+		// player's record of damage dealt *by* the victim — which silently revoked
+		// the victim's pending assist credit on every enemy still alive.
+		dest.damageSources = {};
 
 		const killMessage = isSuicide
 			? `${source.name} committed suicide`
@@ -1662,6 +2005,7 @@ export class Room {
 			goals: player.totalGoals,
 			score: player.score,
 			won: false, // unknown at kill time, will be corrected at round end
+			mode: this.game.mode.code,
 		});
 		authSocket.emit("questProgressUpdate", snapshot);
 
@@ -1748,6 +2092,7 @@ export class Room {
 				});
 
 				setTimeout(() => {
+					if (this.isClosed) return;
 					pkup.active = true;
 					this.io.emit("4", pkup, i, 0);
 				}, 15000);
@@ -1771,34 +2116,8 @@ export class Room {
 			this.io.emit("4", pkup, i, 0);
 		}
 
-		if (this.game.mode.code === "hp") {
-			if (player.scoreCountdown > 0) {
-				player.scoreCountdown -= player.delta;
-			} else {
-				player.isInHardpoint = false;
-
-				for (const tl of this.game.scoreTiles) {
-					if (
-						!dotInRect(player.x, player.y, tl.x, tl.y, tl.scale, tl.scale) ||
-						tl.objTeam === player.team
-					)
-						continue;
-
-					player.scoreCountdown = 1000;
-					player.isInHardpoint = true;
-					this.updateScore(HARDPOINT_POINTS, player);
-					this.io.emit("upd", {
-						i: player.index,
-						s: player.score,
-						goa: player.totalGoals,
-					});
-				}
-
-				if (!player.isInHardpoint) {
-					player.hardpointScore = 0;
-				}
-			}
-		}
+		// (hardpoint capture used to be handled here, on the movement packet. It now
+		// runs on the room's own clock in tickHardpoints.)
 		if (this.game.mode.code === "zmtch") {
 			for (const tl of this.game.scoreTiles) {
 				if (
@@ -1889,4 +2208,20 @@ export class Room {
 			this.io.emit("4", lootToActivate, i, 0);
 		}, 5000));
 	}
+}
+
+/**
+ * Opens a permanent (ranked) room and registers it. Lives here rather than in
+ * index.ts so the admin panel can reopen a closed room through the exact same
+ * path boot uses — the DEV rooms have no other recreation mechanism, and
+ * `close()` does not guard on isPermanent by design (an admin closing a broken
+ * permanent room must work).
+ */
+export function createPermanentRoom(io: Server, code: string, modeIndex = 0): Room {
+	const room = new Room(io, code);
+	room.isPermanent = true;
+	rooms.push(room);
+	room.game.newRound(modeIndex);
+	room.handleSocket();
+	return room;
 }

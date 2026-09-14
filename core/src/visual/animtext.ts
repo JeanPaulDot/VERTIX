@@ -310,7 +310,12 @@ export function deactiveAllAnimTexts() {
 		animTexts[i].active = false;
 	}
 }
-var cachedTextRenders: Record<string, HTMLCanvasElement> = {};
+// Every player name, rank and clan tag is rendered through here once per frame,
+// so this is a hot path *and* an unbounded one: the key space is every distinct
+// name/size/colour the client has ever seen (mods, long sessions, busy public
+// rooms). A Map with LRU eviction keeps the hit rate without the leak.
+const TEXT_RENDER_CACHE_LIMIT = 400;
+const cachedTextRenders = new Map<string, HTMLCanvasElement>();
 export function renderShadedAnimText(
 	text: string,
 	fontSize: number,
@@ -318,8 +323,13 @@ export function renderShadedAnimText(
 	layerCount: number,
 	fontExtra: string,
 ) {
-	let tmpIndex = `${text}${fontSize}${color}${layerCount}${fontExtra}`;
-	let cachedText = cachedTextRenders[tmpIndex];
+	const tmpIndex = `${text}\u0000${fontSize}\u0000${color}\u0000${layerCount}\u0000${fontExtra}`;
+	let cachedText = cachedTextRenders.get(tmpIndex);
+	if (cachedText !== undefined) {
+		// refresh recency: re-inserting moves the key to the end of the Map order
+		cachedTextRenders.delete(tmpIndex);
+		cachedTextRenders.set(tmpIndex, cachedText);
+	}
 	if (cachedText === undefined) {
 		let tmpCanvas = document.createElement("canvas");
 		let ctx = tmpCanvas.getContext("2d");
@@ -344,7 +354,12 @@ export function renderShadedAnimText(
 		ctx.fillStyle = color;
 		ctx.fillText(text, centerX, centerY);
 		cachedText = tmpCanvas;
-		cachedTextRenders[tmpIndex] = cachedText;
+		if (cachedTextRenders.size >= TEXT_RENDER_CACHE_LIMIT) {
+			// Map preserves insertion order, so the first key is the least recently used
+			const oldest = cachedTextRenders.keys().next().value;
+			if (oldest !== undefined) cachedTextRenders.delete(oldest);
+		}
+		cachedTextRenders.set(tmpIndex, cachedText);
 	}
 	return cachedText;
 }

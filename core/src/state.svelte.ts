@@ -4,6 +4,8 @@ import * as cosmetics from "./skins.ts";
 import { sprays } from "./sprays.ts";
 import type { Camo, Hat, MapData, Player, Shirt, Sprite } from "./types.ts";
 
+export type QuestRarity = "common" | "rare" | "epic" | "legendary";
+
 export type QuestItem = {
 	id: number;
 	name: string;
@@ -13,6 +15,10 @@ export type QuestItem = {
 	claimed: boolean;
 	claimable: boolean;
 	questKey: string;
+	/** tier styling in the rewards card; mirrors the server's QuestDef.rarity */
+	rarity: QuestRarity;
+	/** game mode code this quest is restricted to, if any */
+	mode?: string;
 };
 
 export type QuestStreak = {
@@ -161,7 +167,41 @@ export const st = $state({
 	// false for private/custom rooms, whose rounds don't count toward stats or quests
 	roomRanked: true,
 	// which main-menu modal is open (null = none)
-	menuModal: null as null | "account" | "rooms" | "settings" | "controls" | "mods" | "bug",
+	menuModal: null as
+		| null
+		| "account"
+		| "rooms"
+		| "settings"
+		| "controls"
+		| "mods"
+		| "bug"
+		| "social",
+	/**
+	 * Who is playing right now, pushed over the lobby socket.
+	 *
+	 * The social pages used to be separate documents with no socket at all, so
+	 * "online" meant whatever the last `GET /api/friends` returned. `account` is
+	 * the signed-in identity and is what presence is matched on — the display
+	 * name is whatever the player typed into the name box.
+	 */
+	presence: [] as {
+		name: string;
+		account: string | null;
+		room: string;
+		mode: string;
+		ranked: boolean;
+	}[],
+	/** which tab the social hub is showing */
+	socialTab: "profile" as "profile" | "friends" | "clans" | "leaderboards",
+	/**
+	 * Whose profile the hub's profile tab is showing. Entry points set this
+	 * before opening the hub (scoreboard rows, friend rows, leaderboard rows);
+	 * null means "my own" and falls back to the signed-in account, then the
+	 * typed name.
+	 */
+	socialProfileUser: null as string | null,
+	/** clan the hub's clans tab should open into (leaderboard rows, /clans.html?X redirects) */
+	socialClanFocus: null as string | null,
 	// quest system state
 	quests: {
 		daily: [] as QuestItem[],
@@ -174,6 +214,7 @@ export const st = $state({
 	// socket handlers in app.tsx write them too
 	messages: {
 		login: "",
+		name: "",
 		clanDB: "Join or Create a Clan.",
 		clanInv: "Invite or Kick Members.",
 		clanCht: "(eg. Discord URL)",
@@ -218,6 +259,29 @@ export const st = $state({
 		},
 		parseStoredObject("keysList"),
 	),
+	/**
+	 * Player indexes that have spawned in the current round. The server already
+	 * filters the in-game leaderboard ("lb") to players who have taken a spawn, so
+	 * this is simply what it last told us — the end-of-round scoreboard used to
+	 * list everyone in the room, including people who joined during the round and
+	 * never played, sitting at 0/0/0.
+	 */
+	spawnedIndexes: [] as number[],
+	/**
+	 * End-of-round panel. These three regions (round timer, VICTORY/DEFEAT banner
+	 * and the mode-vote buttons) were empty divs in GameStatsTable.svelte that
+	 * app.tsx filled imperatively — createElement, onclick closures and
+	 * className string swaps — so the scoreboard was half Svelte and half hand-
+	 * rolled DOM. They are ordinary reactive state now.
+	 */
+	gameOverPanel: {
+		visible: false,
+		timerText: "GAME STATS",
+		winnerText: "",
+		winnerColor: "#fff",
+		modeVotes: [] as { name: string; votes: number }[],
+		myVote: null as number | null,
+	},
 	chatLines: [] as {
 		text: string;
 		source: "system" | "notif" | "me" | "blue" | "red";

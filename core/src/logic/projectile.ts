@@ -246,15 +246,28 @@ export class Projectile {
 		const grid = map.tileGrid;
 		if (!grid) return map.tiles;
 		const reach = Math.abs(this.cEndX - this.x) + Math.abs(this.cEndY - this.y) + this.height;
-		return (
-			collectCollisionTilesAround(
-				map,
-				(this.x + this.cEndX) / 2,
-				(this.y + this.cEndY) / 2,
-				this.nearbyTiles,
-				1 + Math.ceil(reach / grid.scale),
-			) ?? map.tiles
+		const tiles = collectCollisionTilesAround(
+			map,
+			(this.x + this.cEndX) / 2,
+			(this.y + this.cEndY) / 2,
+			this.nearbyTiles,
+			1 + Math.ceil(reach / grid.scale),
 		);
+		if (!tiles) return map.tiles;
+		// Nearest first. The collision loop stops at the first tile that reports a
+		// hit, and this comes back in grid order — so at a corner, where the
+		// segment overlaps two tiles, the bullet could resolve against the further
+		// one and appear to punch through the nearer wall before stopping.
+		const originX = this.x;
+		const originY = this.y;
+		tiles.sort((a, b) => {
+			const ax = a.x + a.scale / 2 - originX;
+			const ay = a.y + a.scale / 2 - originY;
+			const bx = b.x + b.scale / 2 - originX;
+			const by = b.y + b.scale / 2 - originY;
+			return ax * ax + ay * ay - (bx * bx + by * by);
+		});
+		return tiles;
 	}
 
 	activate() {
@@ -277,7 +290,7 @@ export class Projectile {
 	deactivate() {
 		this.active = false;
 	}
-	hitSomething(flipY: boolean, spriteType: number) {
+	hitSomething(flipY: boolean, spriteType: number, bulletHoleLayer = 0) {
 		if (this.spriteIndex !== 2 && typeof window !== "undefined") {
 			particleCone(
 				10,
@@ -289,6 +302,7 @@ export class Projectile {
 				16,
 				spriteType,
 				flipY,
+				bulletHoleLayer,
 			);
 		}
 	}
@@ -395,6 +409,9 @@ export class Projectile {
 		this.hitSomething(
 			this.cEndX > clt.x && this.cEndX < clt.x + clt.w && this.cEndY > clt.y - clt.h,
 			2,
+			// layer 1 draws after the clutter itself, so the hole marks the barrel
+			// instead of the floor behind it
+			1,
 		);
 	}
 }

@@ -15,11 +15,23 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 
 const LEVEL_ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
-function resolveLevel(): number {
-	const raw = (process.env.LOG_LEVEL ?? "info").toLowerCase() as LogLevel;
-	return LEVEL_ORDER[raw] ?? LEVEL_ORDER.info;
+function resolveLevel(raw: string | undefined): LogLevel {
+	return LEVEL_ORDER[(raw ?? "info").toLowerCase() as LogLevel] === undefined
+		? "info"
+		: ((raw ?? "info").toLowerCase() as LogLevel);
 }
-const threshold = resolveLevel();
+
+// Mutable so the admin panel can change verbosity at runtime without a
+// restart — the old const meant LOG_LEVEL was frozen for the process lifetime.
+let currentLevel: LogLevel = resolveLevel(process.env.LOG_LEVEL);
+let threshold = LEVEL_ORDER[currentLevel];
+
+export function setLogLevel(level: LogLevel): boolean {
+	if (LEVEL_ORDER[level] === undefined) return false;
+	currentLevel = level;
+	threshold = LEVEL_ORDER[level];
+	return true;
+}
 
 // ANSI colour only when attached to a terminal. `docker compose logs` is not a
 // TTY, so production output stays plain and greppable.
@@ -52,7 +64,9 @@ export const log = {
 	error: (tag: string, message: string) => emit("error", tag, message),
 	/** Un-timestamped, un-prefixed line — for the boot banner only. */
 	raw: (message: string) => console.log(message),
-	level: (Object.keys(LEVEL_ORDER) as LogLevel[]).find((l) => LEVEL_ORDER[l] === threshold) ?? "info",
+	get level(): LogLevel {
+		return currentLevel;
+	},
 };
 
 /** "2h14m" / "6m03s" / "12s" — compact durations for uptime and session lengths. */

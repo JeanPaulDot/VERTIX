@@ -47,7 +47,8 @@ Released under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4
 - **Room Browser** — filter by mode, search by code, create private rooms
 - **Settings** — graphics toggles, keybind customization, chat options
 - **Reward Popups** — animated crate opening, unlock reveals, rank-up notifications
-- **Admin Dashboard** — private `/admin` view of live rooms, players, lobby presence and user bug reports (gated by `ADMIN_TOKEN`)
+- **Social Hub** — in-game tabbed overlay (Profile · Friends · Clans · Leaderboards) with live socket presence, in-place JOIN buttons and actionable clan management; the old standalone social pages redirect into it
+- **Admin Dashboard** — private `/admin` Svelte page: live rooms & player moderation (kick/ban/mute/team/boss), account management, ban & mute lists with audit log, bug-report resolution, server broadcast / maintenance mode / runtime log level, and activity analytics (DAU, mode popularity, concurrency, retention)
 
 ## Tech Stack
 
@@ -156,7 +157,7 @@ Open http://localhost:5173
    ```
    NODE_ENV=production
    SESSION_SECRET=<random-64-char-string>
-   CORS_ORIGINS=https://vertix.vestiges.tech
+   CORS_ORIGINS=
    TRUST_PROXY=1
    ADMIN_TOKEN=<random-string>   # enables /admin (optional, min 16 chars)
    ```
@@ -170,7 +171,7 @@ Open http://localhost:5173
    ```
    DISCORD_CLIENT_ID=your-app-id
    DISCORD_CLIENT_SECRET=your-secret
-   DISCORD_REDIRECT_URI=https://vertix.vestiges.tech/api/auth/discord/callback
+   DISCORD_REDIRECT_URI=https://vertix.fr/api/auth/discord/callback
    ```
    The redirect URI must be the same origin players open the game on and must be
    registered in the [Discord developer portal](https://discord.com/developers/applications).
@@ -209,7 +210,7 @@ In production the Node server serves the built frontend, `/api` **and** Socket.I
 all on port `1118`, so one proxy rule covers everything — the websocket upgrade
 included. `nginx.conf` in the repo root is a ready-to-use vhost for a plain nginx +
 certbot host; if you run Nginx Proxy Manager instead, forward
-`https://vertix.vestiges.tech` → `http://server:1118` with websockets enabled.
+`https://vertix.fr` → `http://server:1118` with websockets enabled.
 
 Either way the proxy must send `X-Forwarded-For` and the server must have
 `TRUST_PROXY=1`, or per-IP rate limiting collapses onto a single key.
@@ -232,6 +233,27 @@ useful for a proxy health check or a quick `curl` from the host:
 ```bash
 docker compose exec server wget -qO- http://localhost:1118/api/health
 ```
+
+### Admin dashboard & moderation
+
+The admin panel lives at `/admin` (a built Svelte page; open it while signed in as a
+mod/admin account, or paste the `ADMIN_TOKEN`).
+
+- **Roles** — `users.role` is `player` | `mod` | `admin`. Mods handle the daily
+  toolbox (kick, mute, timed bans, bug reports, all reads); permanent bans,
+  account edits, room/server control and role changes are admin-only.
+  `ADMIN_TOKEN` remains the break-glass full-admin path. Grant your own account
+  the role once via `POST /api/admin/accounts/:id/role` using the token.
+- **Bans** block joining at the socket layer (lobby middleware + room join),
+  through the same `kick` protocol players already see reasons in. Account
+  bans also invalidate sessions (force-logout) and kick live sockets. IP bans
+  cover guests; `user_ips` powers alt detection.
+- **Mutes** block chat only, with a reason shown to the muted player.
+- **Audit** — every mutating admin action writes an `admin_audit` row; the panel
+  shows it under AUDIT. Chat is retained 7 days (`chat_log`) for abuse review.
+- **Analytics** — sessions carry the mode; DAU, mode popularity, crate sources,
+  quest completion, week-1 retention and a per-minute concurrency series feed
+  the OVERVIEW tab.
 
 ### Typechecking and tests
 
@@ -342,9 +364,21 @@ Quest score rewards are **bonus score** — they do not affect ranking.
 - [x] Log injection hardening — control chars/ANSI stripped from names and chat
 - [x] Boss Hunt via mode vote — boss class/health is re-applied on round
       transition, and the boss role is reset when the mode rotates away
+- [x] Social hub — the four standalone social pages folded into an in-game tabbed
+      overlay with live presence, leaderboard rank-change animation and in-place
+      clan management; old links redirect into the SPA
 - [x] Admin dashboard — `/admin` with live rooms, players and lobby presence,
       gated by `ADMIN_TOKEN`
 - [x] Bug reports — users can submit a report from the menu; it lands in the
       admin dashboard (rate-limited and sanitised)
+- [x] Moderation stack — account & IP bans with expiry, chat mutes, per-user
+      roles (mod/admin), a full admin audit trail, and enforcement at the
+      socket layer with player-visible reasons
+- [x] Admin panel rework — rebuilt as a Svelte page with live player actions
+      (kick/ban/mute/team/respawn/boss/score), account management, room control
+      (open/close/configure/restart/bots), server ops (broadcast, maintenance
+      mode, runtime log level) and bug-report resolution
+- [x] Admin analytics — DAU, mode popularity, crate sources, quest completion,
+      week-1 retention and a per-minute concurrency series
 
 </details>

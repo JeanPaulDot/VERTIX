@@ -7,7 +7,7 @@ export const characterClasses = [
 		height: 94,
 		width: 50,
 		speed: 0.57,
-		jumpStrength: 0.72,
+		jumpStrength: 0.72, // the all-rounder: unchanged, and the yardstick for the rest
 		gravityStrength: 0.0042,
 		weaponIndexes: [0],
 		pWeapon: "Machine Gun",
@@ -21,7 +21,7 @@ export const characterClasses = [
 		height: 94,
 		width: 50,
 		speed: 0.57,
-		jumpStrength: 0.72,
+		jumpStrength: 0.75, // light and quick on his feet
 		gravityStrength: 0.0042,
 		weaponIndexes: [1, 5],
 		pWeapon: "Desert Eagle",
@@ -35,7 +35,7 @@ export const characterClasses = [
 		height: 94,
 		width: 50,
 		speed: 0.57,
-		jumpStrength: 0.72,
+		jumpStrength: 0.7, // 50hp sniper - meant to hold angles, not duel in the air
 		gravityStrength: 0.0042,
 		weaponIndexes: [2, 7],
 		pWeapon: "Sniper",
@@ -49,7 +49,7 @@ export const characterClasses = [
 		height: 94,
 		width: 50,
 		speed: 0.684,
-		jumpStrength: 0.72,
+		jumpStrength: 0.82, // the mobility class; the highest jump of the pickable roster
 		gravityStrength: 0.0042,
 		weaponIndexes: [3],
 		pWeapon: "Toy Blaster",
@@ -63,7 +63,7 @@ export const characterClasses = [
 		height: 94,
 		width: 50,
 		speed: 0.5985,
-		jumpStrength: 0.72,
+		jumpStrength: 0.69, // close-range bruiser, heavier than he looks
 		gravityStrength: 0.0042,
 		weaponIndexes: [4, 5],
 		pWeapon: "Shotgun",
@@ -77,7 +77,7 @@ export const characterClasses = [
 		height: 94,
 		width: 50,
 		speed: 0.513,
-		jumpStrength: 0.72,
+		jumpStrength: 0.66, // 120hp and a rocket launcher; slow to leave the ground
 		gravityStrength: 0.0042,
 		name: "General Weiss",
 		weaponIndexes: [6],
@@ -92,7 +92,7 @@ export const characterClasses = [
 		height: 94,
 		width: 50,
 		speed: 0.3876,
-		jumpStrength: 0.72,
+		jumpStrength: 0.64, // 200hp minigun - the slowest and the heaviest
 		gravityStrength: 0.0042,
 		weaponIndexes: [8],
 		pWeapon: "Minigun",
@@ -106,7 +106,7 @@ export const characterClasses = [
 		height: 94,
 		width: 50,
 		speed: 0.57,
-		jumpStrength: 0.72,
+		jumpStrength: 0.7, // weighed down by the fuel pack
 		gravityStrength: 0.0042,
 		weaponIndexes: [9],
 		pWeapon: "Flamethrower",
@@ -120,7 +120,7 @@ export const characterClasses = [
 		height: 94,
 		width: 50,
 		speed: 0.456,
-		jumpStrength: 0.72,
+		jumpStrength: 0.86, // 800hp, no weapons: the jump *is* the kit
 		gravityStrength: 0.0042,
 		weaponIndexes: [],
 		pWeapon: "Jump",
@@ -134,7 +134,7 @@ export const characterClasses = [
 		height: 94,
 		width: 50,
 		speed: 0.57,
-		jumpStrength: 0.72,
+		jumpStrength: 0.71, // a shade below baseline for the extra ordnance
 		gravityStrength: 0.0042,
 		weaponIndexes: [10],
 		pWeapon: "Nade Launcher",
@@ -151,7 +151,7 @@ export const characterClasses = [
 		height: 94,
 		width: 50,
 		speed: 0.456,
-		jumpStrength: 0.72,
+		jumpStrength: 0.6, // boss: 2000hp, and not supposed to escape upward
 		gravityStrength: 0.0042,
 		weaponIndexes: [11, 12],
 		hasDown: false,

@@ -64,7 +64,17 @@ export const BOT_PREFERRED_RANGE: Record<number, number> = {
 	4: 220, // Vince (shotgun) pushes in
 	7: 200, // Arsonist (flamethrower) pushes in
 	6: 300, // Spray N' Pray
+	5: 520, // Rocketeer — 240px blast radius, and it damages the shooter
+	9: 480, // Nademan — same blast radius, arcing projectile
 };
+
+/**
+ * How far outside its own blast radius a bot insists on being before firing an
+ * explosive. Rocketeer and Nademan carry a 240px blast; the old default range of
+ * 350 put the retreat threshold at 175px, well inside it, so they routinely blew
+ * themselves up on a target they had just walked into.
+ */
+export const BOT_BLAST_SAFETY_MARGIN = 1.35;
 
 export type BotState = {
 	difficulty: BotDifficulty;

@@ -50,6 +50,19 @@ export type Player = {
 	isBoss: boolean;
 	loggedIn?: boolean;
 	socketId?: string;
+	/**
+	 * Account id behind this player, when they are signed in. Server-only — it is
+	 * stripped before any broadcast (see withoutServerFields in room.ts) — and it
+	 * is what lets presence, moderation and the admin panel identify a player by
+	 * account rather than by the display name they typed, which anyone can copy.
+	 */
+	userId?: number | null;
+	/** Account username (not the typed display name). Server-only, like userId. */
+	accountName?: string | null;
+	/** Client IP resolved at connect. Server-only, like userId. */
+	ip?: string | null;
+	/** When this player's socket connected. Server-only, like userId. */
+	sessionStartedAt?: number | null;
 	// server-controlled AI player (no socket); never writes stats
 	isBot?: boolean;
 	likedBy: number[];
@@ -232,6 +245,14 @@ export type Tile = {
 	hasCollision: boolean;
 	hardPoint: boolean;
 	objTeam: string;
+	/**
+	 * Memoised sprite-cache keys. Both are derived purely from tile geometry, which
+	 * is fixed once setupMap runs, but they were rebuilt from 7-10 fields on every
+	 * lookup — i.e. once per visible tile per frame, three times over. Computed
+	 * lazily on the client; never serialised.
+	 */
+	wallCacheKey?: string;
+	floorCacheKey?: string;
 	edgeTile: boolean;
 };
 

@@ -29,70 +29,21 @@ function getWeeklyPeriodStart(now: Date): string {
 	return toUtcDate(d);
 }
 
-// --- Quest definitions ---
+// Quest definitions, rarity weighting, the family->stat map and the picker all
+// live in core/src/logic/quests.ts so they can be unit-tested without a database.
+// This module keeps the persistence, rewards and payload shaping.
+import {
+	DAILY_QUEST_POOL,
+	WEEKLY_QUEST_POOL,
+	QUEST_BY_KEY,
+	pickQuests,
+	questProgressDelta,
+	type QuestRarity,
+	type RoundQuestStats,
+} from "core/src/logic/quests.ts";
 
-// `family` groups quests that track the same underlying stat. Picking is limited
-// to one quest per family, so a day can't hand out "get 10 kills", "get 15 kills"
-// and "get 20 kills" — three objectives that one kill count satisfies at once.
-type QuestFamily = "kills" | "damage" | "wins" | "goals" | "heal" | "score";
+export type { QuestRarity, RoundQuestStats };
 
-type QuestDef = {
-	key: string;
-	family: QuestFamily;
-	name: string;
-	rewardType: "score" | "crate";
-	rewardAmount: number;
-	goal: number;
-};
-
-const DAILY_QUEST_POOL: QuestDef[] = [
-	{ key: "kills_10", family: "kills", name: "Get 10 kills", rewardType: "score", rewardAmount: 150, goal: 10 },
-	{ key: "kills_15", family: "kills", name: "Get 15 kills", rewardType: "score", rewardAmount: 200, goal: 15 },
-	{ key: "kills_20", family: "kills", name: "Get 20 kills", rewardType: "score", rewardAmount: 250, goal: 20 },
-	{ key: "damage_500", family: "damage", name: "Deal 500 damage", rewardType: "score", rewardAmount: 200, goal: 500 },
-	{ key: "damage_1000", family: "damage", name: "Deal 1,000 damage", rewardType: "score", rewardAmount: 300, goal: 1000 },
-	{ key: "damage_1500", family: "damage", name: "Deal 1,500 damage", rewardType: "score", rewardAmount: 400, goal: 1500 },
-	{ key: "win_1", family: "wins", name: "Win 1 round", rewardType: "crate", rewardAmount: 1, goal: 1 },
-	{ key: "win_2", family: "wins", name: "Win 2 rounds", rewardType: "crate", rewardAmount: 2, goal: 2 },
-	{ key: "win_3", family: "wins", name: "Win 3 rounds", rewardType: "crate", rewardAmount: 3, goal: 3 },
-	{ key: "goals_2", family: "goals", name: "Score 2 goals", rewardType: "crate", rewardAmount: 1, goal: 2 },
-	{ key: "heal_300", family: "heal", name: "Heal 300 HP", rewardType: "score", rewardAmount: 200, goal: 300 },
-];
-
-const WEEKLY_QUEST_POOL: QuestDef[] = [
-	{ key: "score_10000", family: "score", name: "Score 10,000 points", rewardType: "crate", rewardAmount: 2, goal: 10000 },
-	{ key: "kills_100", family: "kills", name: "Get 100 kills", rewardType: "crate", rewardAmount: 3, goal: 100 },
-	{ key: "wins_20", family: "wins", name: "Win 20 rounds", rewardType: "crate", rewardAmount: 2, goal: 20 },
-	{ key: "damage_15000", family: "damage", name: "Deal 15,000 damage", rewardType: "crate", rewardAmount: 3, goal: 15000 },
-];
-
-// Simple seeded random from date string so all players share the same daily pool
-function seededRandom(seed: string): number {
-	let h = 0;
-	for (let i = 0; i < seed.length; i++) {
-		h = ((h << 5) - h + seed.charCodeAt(i)) | 0;
-	}
-	return (h >>> 0) / 4294967296;
-}
-
-function pickQuests(pool: QuestDef[], seed: string, count: number): QuestDef[] {
-	const shuffled = [...pool].sort((a, b) => seededRandom(seed + a.key) - seededRandom(seed + b.key));
-	// one per family first (so the three picks track three different stats), then
-	// backfill from what's left if the pool has fewer families than `count`
-	const picked: QuestDef[] = [];
-	const usedFamilies = new Set<QuestFamily>();
-	for (const def of shuffled) {
-		if (picked.length >= count) break;
-		if (usedFamilies.has(def.family)) continue;
-		usedFamilies.add(def.family);
-		picked.push(def);
-	}
-	for (const def of shuffled) {
-		if (picked.length >= count) break;
-		if (!picked.includes(def)) picked.push(def);
-	}
-	return picked;
-}
 
 // --- Public API ---
 
@@ -105,6 +56,10 @@ export type QuestData = {
 	claimed: boolean;
 	claimable: boolean;
 	questKey: string;
+	/** drives the tier styling in the rewards card */
+	rarity: QuestRarity;
+	/** game mode code this quest is restricted to, if any */
+	mode?: string;
 };
 
 export type StreakData = {
@@ -134,6 +89,7 @@ function questToData(q: QuestRow): QuestData {
 		q.reward_type === "crate"
 			? `+${q.reward_amount} CRATE${q.reward_amount > 1 ? "S" : ""}`
 			: `+${q.reward_amount} SCORE`;
+	const def = QUEST_BY_KEY.get(q.quest_key);
 	return {
 		id: q.id,
 		name: q.name,
@@ -143,6 +99,8 @@ function questToData(q: QuestRow): QuestData {
 		claimed: q.claimed === 1,
 		claimable: q.claimed === 0 && q.progress >= q.goal,
 		questKey: q.quest_key,
+		rarity: def?.rarity ?? "common",
+		mode: def?.mode,
 	};
 }
 
@@ -152,7 +110,10 @@ function ensureDailyQuests(userId: number, now: Date): QuestData[] {
 	const existing = getUserQuestsForPeriod(userId, "daily", period);
 	if (existing.length > 0) return existing.map(questToData);
 
-	const seed = `daily-${period}`;
+	// Seeded per user, not just per day. A global seed meant every player in the
+	// world woke up to the identical three quests, which made the daily rotation
+	// feel like a server-wide announcement rather than a personal objective.
+	const seed = `daily-${period}-${userId}`;
 	const picked = pickQuests(DAILY_QUEST_POOL, seed, 3);
 	for (const def of picked) {
 		upsertQuest(userId, "daily", def.key, def.name, def.rewardType, def.rewardAmount, def.goal, period);
@@ -165,7 +126,7 @@ function ensureWeeklyQuest(userId: number, now: Date): QuestData | null {
 	const existing = getUserQuestsForPeriod(userId, "weekly", period);
 	if (existing.length > 0) return questToData(existing[0]);
 
-	const seed = `weekly-${period}`;
+	const seed = `weekly-${period}-${userId}`;
 	const picked = pickQuests(WEEKLY_QUEST_POOL, seed, 1);
 	if (picked.length === 0) return null;
 	const def = picked[0];
@@ -262,54 +223,40 @@ export function recordLogin(userId: number): { streakDay: number; justCompletedS
 	return { streakDay: newDay, justCompletedStreak: justCompleted };
 }
 
-/** Called after round stats save. Increments matching quest progress. */
+/**
+ * Called after round stats save. Advances whichever of the user's quests this
+ * round actually fed.
+ *
+ * This used to be a hand-written table naming every quest key, applied blind to
+ * both periods — up to 24 UPDATEs per player per round, most of them against
+ * quests the player had never been given, and a new quest meant editing the
+ * table. It now reads the user's real rows and asks each quest's own definition
+ * what the round is worth, which is also how mode-specific quests work.
+ */
 export function incrementQuestProgressFromStats(
 	userId: number,
-	stats: { kills: number; deaths: number; score: number; damage: number; healing: number; goals: number; won: boolean },
+	stats: RoundQuestStats,
 ): void {
 	const now = new Date();
-	const dailyPeriod = getDailyPeriodStart(now);
-	const weeklyPeriod = getWeeklyPeriodStart(now);
+	// quest_type is passed through so the two passes can't collide on Mondays,
+	// where dailyPeriod === weeklyPeriod
+	const periods: [quest_type: "daily" | "weekly", period: string][] = [
+		["daily", getDailyPeriodStart(now)],
+		["weekly", getWeeklyPeriodStart(now)],
+	];
 
-	// Map stat fields to quest keys
-	const increments: { key: string; amount: number }[] = [];
-
-	if (stats.kills > 0) {
-		increments.push({ key: "kills_10", amount: stats.kills });
-		increments.push({ key: "kills_15", amount: stats.kills });
-		increments.push({ key: "kills_20", amount: stats.kills });
-		increments.push({ key: "kills_100", amount: stats.kills }); // weekly
-	}
-	if (stats.damage > 0) {
-		increments.push({ key: "damage_500", amount: stats.damage });
-		increments.push({ key: "damage_1000", amount: stats.damage });
-		increments.push({ key: "damage_1500", amount: stats.damage });
-		increments.push({ key: "damage_15000", amount: stats.damage }); // weekly
-	}
-	if (stats.goals > 0) {
-		increments.push({ key: "goals_2", amount: stats.goals });
-	}
-	if (stats.healing > 0) {
-		increments.push({ key: "heal_300", amount: stats.healing });
-	}
-	if (stats.score > 0) {
-		increments.push({ key: "score_10000", amount: stats.score }); // weekly
-	}
-	if (stats.won) {
-		increments.push({ key: "win_1", amount: 1 });
-		increments.push({ key: "win_2", amount: 1 });
-		increments.push({ key: "win_3", amount: 1 });
-		increments.push({ key: "wins_20", amount: 1 }); // weekly
-	}
-
-	// Apply increments to both daily and weekly periods. quest_type is passed so the
-	// two passes can't collide on Mondays, where dailyPeriod === weeklyPeriod.
-	for (const inc of increments) {
-		incrementQuestProgress(userId, "daily", inc.key, inc.amount, dailyPeriod);
-		incrementQuestProgress(userId, "weekly", inc.key, inc.amount, weeklyPeriod);
+	for (const [questType, period] of periods) {
+		for (const row of getUserQuestsForPeriod(userId, questType, period)) {
+			if (row.claimed === 1 || row.progress >= row.goal) continue;
+			const def = QUEST_BY_KEY.get(row.quest_key);
+			if (!def) continue; // a quest that has since been retired from the pool
+			const amount = questProgressDelta(def, stats);
+			if (amount > 0) {
+				incrementQuestProgress(userId, questType, row.quest_key, amount, period);
+			}
+		}
 	}
 }
-
 /** Claim a quest reward. Returns the quest row if successful. */
 export function claimQuestReward(
 	userId: number,
@@ -340,25 +287,36 @@ export function claimStreakRewardForUser(userId: number): boolean {
 /** Lightweight quest progress snapshot for real-time emission during gameplay. */
 export function getQuestProgressSnapshot(
 	userId: number,
-	stats: { kills: number; deaths: number; damage: number; healing: number; goals: number; score: number; won: boolean },
-): { daily: { questKey: string; progress: number; goal: number; name: string; reward: string; claimed: boolean; claimable: boolean }[] } {
+	stats: RoundQuestStats,
+): {
+	daily: {
+		questKey: string;
+		progress: number;
+		goal: number;
+		name: string;
+		reward: string;
+		rarity: QuestRarity;
+		claimed: boolean;
+		claimable: boolean;
+	}[];
+} {
 	const now = new Date();
 	const dailyPeriod = getDailyPeriodStart(now);
 	const quests = getUserQuestsForPeriod(userId, "daily", dailyPeriod);
 
 	const daily = quests.map((q) => {
-		// compute what progress WOULD be after applying these stats
-		let bonusProgress = 0;
-		if (stats.kills > 0 && q.quest_key.startsWith("kills")) bonusProgress += stats.kills;
-		if (stats.damage > 0 && q.quest_key.startsWith("damage")) bonusProgress += stats.damage;
-		if (stats.goals > 0 && q.quest_key.startsWith("goals")) bonusProgress += stats.goals;
-		if (stats.healing > 0 && q.quest_key.startsWith("heal")) bonusProgress += stats.healing;
-		if (stats.won && q.quest_key.startsWith("win")) bonusProgress += 1;
+		// What progress WOULD be once this round is saved. Derived from the quest's
+		// own definition — this used to prefix-match the key ("kills", "damage",
+		// "win"...), which silently disagreed with the writer the moment a key was
+		// named anything else, and could not express a mode restriction at all.
+		const def = QUEST_BY_KEY.get(q.quest_key);
+		const bonusProgress = def ? questProgressDelta(def, stats) : 0;
 
 		const projected = Math.min(q.goal, q.progress + bonusProgress);
-		const rewardLabel = q.reward_type === "crate"
-			? `+${q.reward_amount} CRATE${q.reward_amount > 1 ? "S" : ""}`
-			: `+${q.reward_amount} SCORE`;
+		const rewardLabel =
+			q.reward_type === "crate"
+				? `+${q.reward_amount} CRATE${q.reward_amount > 1 ? "S" : ""}`
+				: `+${q.reward_amount} SCORE`;
 
 		return {
 			questKey: q.quest_key,
@@ -366,6 +324,7 @@ export function getQuestProgressSnapshot(
 			goal: q.goal,
 			name: q.name,
 			reward: rewardLabel,
+			rarity: def?.rarity ?? "common",
 			claimed: q.claimed === 1,
 			claimable: q.claimed === 0 && projected >= q.goal,
 		};

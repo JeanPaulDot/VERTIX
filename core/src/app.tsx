@@ -7,6 +7,7 @@ import { weaponNames, weapons, characterClasses as baseCharacterClasses } from "
 import { Projectile } from "./logic/projectile.ts";
 import { sampleSnapshots, pruneSnapshots } from "./logic/interpolation.ts";
 import { loadSounds, playSound, startSoundTrack, stopAllSounds } from "./sound.ts";
+import { containsBadWord } from "./badWords.ts";
 import { st, type CrateWonItem } from "./state.svelte.ts";
 import type {
 	Account,
@@ -76,6 +77,55 @@ var oldTime = performance.now();
 const MAX_FRAME_DELTA_MS = 100;
 var inputNumber = 0;
 var thisInput: InputSendData[] = [];
+/**
+ * Movement used to be emitted once per *rendered* frame, so a 240Hz client sent
+ * 240 packets a second for the same movement a 60Hz client described in 60.
+ * Consecutive frames are now merged into one packet, but only while the
+ * direction and jump flag are identical — which is exactly the case where
+ * movement is linear in delta (`x += hdt * speed * dt` is additive), so the
+ * merged packet simulates to the same position as the frames it replaces. Any
+ * change of direction, or a jump, flushes immediately, so input latency is
+ * unchanged; only the redundant duplicate packets go away.
+ */
+const INPUT_TICK_MS = 16;
+/** earliest the local player may fire any weapon; see the fire test in updateGameLoop */
+var nextLocalShotAt = 0;
+var pendingInput: InputSendData | null = null;
+
+function flushMovementInput() {
+	if (!pendingInput) return;
+	socket.emit("4", pendingInput);
+	pendingInput = null;
+}
+
+function queueMovementInput(
+	hdt: number,
+	vdt: number,
+	jump: number,
+	delta: number,
+	timestamp: number,
+) {
+	if (
+		pendingInput &&
+		pendingInput.hdt === hdt &&
+		pendingInput.vdt === vdt &&
+		pendingInput.s === jump &&
+		pendingInput.delta + delta < INPUT_TICK_MS
+	) {
+		pendingInput.delta += delta;
+		pendingInput.ts = timestamp;
+		return;
+	}
+	flushMovementInput();
+	pendingInput = { hdt, vdt, ts: timestamp, isn: inputNumber, s: jump, delta };
+	inputNumber++;
+	// Recorded for reconciliation *now*, not at flush: this frame's movement has
+	// already been predicted locally, so if the server's ack landed before the
+	// packet went out, the replay would rewind the player by the missing step.
+	// thisInput holds the same object, so a later merge updates both.
+	thisInput.push(pendingInput);
+	if (delta >= INPUT_TICK_MS || jump === 1) flushMovementInput();
+}
 
 var inMainMenu = true;
 
@@ -89,6 +139,18 @@ declare global {
 window.startGame = startGame;
 async function startGame() {
 	if (st.startingGame || st.changingLobby) return;
+	// a name is required, and it must not contain a banned word
+	const name = st.playerName.replace(/(<([^>]+)>)/gi, "").trim();
+	if (name.length === 0) {
+		st.messages.name = "Please enter a name to play.";
+		return;
+	}
+	if (containsBadWord(name)) {
+		st.messages.name = "That name contains a banned word.";
+		return;
+	}
+	st.messages.name = "";
+	st.playerName = name.substring(0, 25);
 	// no room chosen by hand → autojoin the best available one and wait for its
 	// connection to settle, then fall through and enter the game in this same flow
 	if (!st.room) {
@@ -96,7 +158,6 @@ async function startGame() {
 	}
 	if (!st.startingGame && !st.changingLobby) {
 		st.startingGame = true;
-		st.playerName = st.playerName.replace(/(<([^>]+)>)/gi, "").substring(0, 25);
 
 		document.getElementById("loadText")!.textContent = "LOADING ASSETS";
 		loadingWrapper.style.display = "block";
@@ -114,9 +175,7 @@ function enterGame() {
 	startSoundTrack(2);
 	document.getElementById("startMenuWrapper")!.style.display = "none";
 	mainCanvas.focus();
-	if (!st.room) {
-		socket.emit("create");
-	}
+
 	hideMenuUI();
 	animateOverlay = true;
 	if (st.player.dead) {
@@ -127,7 +186,7 @@ function enterGame() {
 		inMainMenu = false;
 		st.startingGame = false;
 		if (st.gameOver) {
-			document.getElementById("gameStatWrapper")!.style.display = "block";
+			st.gameOverPanel.visible = true;
 		} else {
 			showUI();
 		}
@@ -206,6 +265,22 @@ window.onload = async () => {
 		loadingWrapper.style.display = "none";
 	});
 
+	// social deep links first: the retired standalone pages redirect here as
+	// /?social=<tab>&user=<name>, and that string must never fall through to the
+	// room-code branch below
+	const socialParams = new URLSearchParams(location.search);
+	const socialTab = socialParams.get("social");
+	if (socialTab) {
+		if (["profile", "friends", "clans", "leaderboards"].includes(socialTab)) {
+			st.socialTab = socialTab as typeof st.socialTab;
+		}
+		st.socialProfileUser = socialParams.get("user");
+		st.socialClanFocus = socialParams.get("clan");
+		st.menuModal = "social";
+		history.replaceState(null, "", "/");
+		openLobby();
+		return;
+	}
 	// only join automatically when the URL carries an explicit invite (?ROOMCODE).
 	// otherwise we no longer autojoin on load: the player picks a room by hand from
 	// the browser, and autojoin is used purely as a fallback at ENTER GAME (see
@@ -293,7 +368,11 @@ function updateAccountPage(a: Account) {
 	st.player.account = a;
 }
 function showUserStatPage(userName: string) {
-	window.open(`/profile.html?${userName}`, "_blank");
+	// in-game name clicks open the hub's profile tab; the hub is mounted outside
+	// #startMenuWrapper so it is reachable while a game is running
+	st.socialProfileUser = userName;
+	st.socialTab = "profile";
+	st.menuModal = "social";
 }
 var gameWidth = 0;
 var gameHeight = 0;
@@ -615,8 +694,13 @@ function setupSocket(sock: Socket) {
 		kickPlayer("Connection failed. Please check your internet connection.");
 	});
 	sock.on("disconnect", (reason) => {
+		if (import.meta.env.DEV) console.debug("socket disconnected:", reason);
+		// "io client disconnect" means *we* closed it — switching rooms, or reopening
+		// the lobby socket after a Discord login so the handshake carries the new
+		// cookie. That is not a dropout. Treating it as one kicked the player to the
+		// "Disconnected" screen the moment they signed in from the menu.
+		if (reason === "io client disconnect") return;
 		kickPlayer("Disconnected. Your connection timed out.");
-		console.log(reason);
 	});
 	sock.on("error", (errorMsg) => {
 		console.log("PLEASE NOTIFY THE DEVELOPER OF THE FOLLOWING ERROR");
@@ -631,8 +715,13 @@ function setupSocket(sock: Socket) {
 			(c) => c.folderName === st.loadout.class.folderName,
 		);
 		st.player.isInHardpoint = false;
+		// a new round re-arms everyone's spawn gate server-side (Game.newRound), so
+		// the scoreboard's "has played this round" list starts empty again too
+		st.spawnedIndexes = [];
 		player.name = st.player.name;
-		sock.emit("gotit", player, init, Date.now(), false);
+		// no timestamp: the server refuses to trust the client's clock and takes its
+		// own Date.now(), so sending one only implied an authority that isn't there
+		sock.emit("gotit", player, init);
 		st.player.dead = true;
 		if (init) {
 			deactiveAllAnimTexts();
@@ -641,7 +730,7 @@ function setupSocket(sock: Socket) {
 			document.getElementById("startMenuWrapper")!.style.display = "flex";
 		}
 		if (st.gameOver) {
-			document.getElementById("gameStatWrapper")!.style.display = "none";
+			st.gameOverPanel.visible = false;
 		}
 		st.gameOver = false;
 		gameOverFade = false;
@@ -824,10 +913,22 @@ function setupSocket(sock: Socket) {
 	sock.on("rsd", receiveServerData);
 	sock.on("upd", updateUserValue);
 	sock.on("vt", updateVoteStats);
+	// live "who is playing" for the social hub. The lobby socket receives a
+	// snapshot on connect and a fresh list whenever someone joins, leaves, or a
+	// room rotates mode.
+	sock.on("presence", (list: typeof st.presence) => {
+		st.presence = Array.isArray(list) ? list : [];
+	});
 	sock.on("add", addUser);
 	sock.on("updHt", (_len: number, data: Hat[]) => (st.cosmetics.hats = data));
 	sock.on("updShrt", (_len: number, data: Shirt[]) => (st.cosmetics.shirts = data));
-	sock.on("updCmo", (_len: number, data: Camo[][]) => (st.cosmetics.camos = data));
+	sock.on("updCmo", (_len: number, data: Camo[] | Camo[][]) => {
+		// The server now sends the catalogue once instead of one identical copy per
+		// weapon; tolerate the old nested shape so a mid-deploy client still works.
+		st.cosmetics.camos = Array.isArray(data[0])
+			? (data as Camo[][])
+			: [data as Camo[]];
+	});
 	sock.on("updUnlocks", (data: { hat: number[]; shirt: number[]; camo: number[] }) => {
 		st.unlockedItems.hat = new Set(data.hat);
 		st.unlockedItems.shirt = new Set(data.shirt);
@@ -877,7 +978,7 @@ function setupSocket(sock: Socket) {
 		if (healthUpdate.bulletIndex !== null) {
 			let serverBullet = findServerBullet(healthUpdate.bulletIndex);
 			if (serverBullet && serverBullet.owner?.index !== st.player.index) {
-				if (player.onScreen && healthDelta < 0 && serverBullet.spriteIndex !== 2) {
+				if (player?.onScreen && healthDelta < 0 && serverBullet.spriteIndex !== 2) {
 					particleCone(
 						12,
 						player.x,
@@ -926,8 +1027,17 @@ function setupSocket(sock: Socket) {
 		}
 	});
 	sock.on("3", (event) => {
-		var destPlayer = findUserByIndex(event.gID);
-		var sourcePlayer = findUserByIndex(event.dID);
+		const destPlayer = findUserByIndex(event.gID);
+		const sourcePlayer = findUserByIndex(event.dID);
+		// A kill can reference a player this client has not added yet (a missed
+		// "add", or a kill landing during the join handshake). Everything below
+		// dereferences both, so bail rather than throw out of the socket handler —
+		// which used to abort the rest of the event, leaving the victim alive.
+		if (!destPlayer || !sourcePlayer) {
+			if (destPlayer) destPlayer.dead = true;
+			sock.emit("ftc", destPlayer ? event.dID : event.gID);
+			return;
+		}
 		destPlayer.dead = true;
 		if (event.kB && event.gID !== st.player.index) {
 			if (event.dID === st.player.index) {
@@ -1065,7 +1175,7 @@ function setupSocket(sock: Socket) {
 		startSoundTrack(1);
 	});
 	sock.on("8", (timeLeft: number) => {
-		document.getElementById("nextGameTimer")!.textContent = `${timeLeft}: UNTIL NEXT ROUND`;
+		st.gameOverPanel.timerText = `${timeLeft}: UNTIL NEXT ROUND`;
 	});
 }
 
@@ -1075,8 +1185,15 @@ function setupInitialSocket(sock: Socket) {
 	// No client-side reconnection logic needed.
 }
 
-function updateVoteStats(a: any) {
-	document.getElementById(`votesText${a.i}`)!.textContent = `${a.n}: ${a.v}`;
+function updateVoteStats(a: { i: number; n: string; v: number }) {
+	// Room.configure() can shrink modeVotes underneath us, and this arrives for
+	// clients that have never opened the stat table — so an out-of-range index is
+	// normal, not an error. (It used to non-null-assert a DOM lookup and throw.)
+	const vote = st.gameOverPanel.modeVotes[a.i];
+	if (vote) {
+		vote.name = a.n;
+		vote.votes = a.v;
+	}
 }
 function showESCMenu() {
 	deactiveAllAnimTexts();
@@ -1084,7 +1201,7 @@ function showESCMenu() {
 	inMainMenu = true;
 	hideUI(false);
 	document.getElementById("startMenuWrapper")!.style.display = "flex";
-	document.getElementById("gameStatWrapper")!.style.display = "none";
+	st.gameOverPanel.visible = false;
 }
 
 function showStatTable(
@@ -1096,9 +1213,10 @@ function showStatTable(
 	hideUI(false);
 
 	if (reset) {
-		document.getElementById("nextGameTimer")!.textContent = "GAME STATS";
-		document.getElementById("winningTeamText")!.textContent = "";
-		document.getElementById("voteModeContainer")!.textContent = "";
+		st.gameOverPanel.timerText = "GAME STATS";
+		st.gameOverPanel.winnerText = "";
+		st.gameOverPanel.modeVotes = [];
+		st.gameOverPanel.myVote = null;
 	} else {
 		let isWinner = st.player.team === winner || st.player.id === winner;
 		if (!isFading) {
@@ -1113,37 +1231,24 @@ function showStatTable(
 					false,
 					2,
 				);
-				document.getElementById("winningTeamText")!.textContent = "VICTORY";
-				document.getElementById("winningTeamText")!.style.color = TeamColors.Blue;
+				st.gameOverPanel.winnerText = "VICTORY";
+				st.gameOverPanel.winnerColor = TeamColors.Blue;
 			} else if (st.player.team.length) {
 				startBigAnimText("Defeat", "Bad Luck!", 2500, true, TeamColors.Red, "#ffffff", false, 2);
-				document.getElementById("winningTeamText")!.textContent = "DEFEAT";
-				document.getElementById("winningTeamText")!.style.color = TeamColors.Red;
+				st.gameOverPanel.winnerText = "DEFEAT";
+				st.gameOverPanel.winnerColor = TeamColors.Red;
 			}
 		}
 		if (modeVoteData != null) {
-			document.getElementById("voteModeContainer")!.textContent = "";
-			for (let i = 0; i < modeVoteData.length; ++i) {
-				let modeVoteBtn = document.createElement("button");
-				modeVoteBtn.className = "modeVoteButton";
-				modeVoteBtn.setAttribute("id", `votesText${i}`);
-				modeVoteBtn.textContent = `${modeVoteData[i].name}: ${modeVoteData[i].votes}`;
-				document.getElementById("voteModeContainer")!.appendChild(modeVoteBtn);
-				modeVoteBtn.onclick = () => {
-					mainCanvas.focus();
-					socket.emit("modeVote", i);
-					for (let j = 0; j < modeVoteData.length; ++j) {
-						if (
-							i === j &&
-							document.getElementById(`votesText${j}`)!.className === "modeVoteButton"
-						) {
-							document.getElementById(`votesText${j}`)!.className = "modeVoteButtonA";
-						} else {
-							document.getElementById(`votesText${j}`)!.className = "modeVoteButton";
-						}
-					}
-				};
-			}
+			// GameStatsTable renders these; the click handler and the selected-state
+			// swap live there too, instead of createElement plus className strings.
+			st.gameOverPanel.modeVotes = modeVoteData.map(
+				(vote: { name: string; votes: number }) => ({
+					name: vote.name,
+					votes: vote.votes,
+				}),
+			);
+			st.gameOverPanel.myVote = null;
 		}
 	}
 
@@ -1152,7 +1257,7 @@ function showStatTable(
 		animateOverlay = false;
 		gameOverFade = true;
 		deactiveAllAnimTexts();
-		document.getElementById("gameStatWrapper")!.style.display = "block";
+		st.gameOverPanel.visible = true;
 	} else {
 		hideStatTable();
 		hideUI(false);
@@ -1161,7 +1266,7 @@ function showStatTable(
 			gameOverFade = true;
 		}, 2500);
 		window.setTimeout(() => {
-			document.getElementById("gameStatWrapper")!.style.display = "block";
+			st.gameOverPanel.visible = true;
 		}, 4500);
 	}
 }
@@ -1171,7 +1276,7 @@ function hideStatTable() {
 	showingScoreBoard = false;
 	animateOverlay = true;
 	drawOverlay(graph, false, true);
-	document.getElementById("gameStatWrapper")!.style.display = "none";
+	st.gameOverPanel.visible = false;
 	document.getElementById("linkBoxRight")!.style.display = "none";
 }
 
@@ -1417,6 +1522,8 @@ function receiveServerData(data: number[]) {
 		if (plr.index !== st.player.index) continue;
 		if (plr.dead || st.gameOver || thisInput.length > 80) {
 			thisInput = [];
+			// drop the un-sent packet too, or it replays against a fresh spawn
+			pendingInput = null;
 		}
 		if (plr.dead) continue;
 		let inputCursor = 0;
@@ -1461,17 +1568,13 @@ function findUserByIndex(index: number): Player {
 	return st.players.find((obj) => obj.index === index) ?? null!;
 }
 
-function sortUsersByPosition(a: Player, b: Player) {
-	if (a.y < b.y) {
-		return -1;
-	} else if (a.y > b.y) {
-		return 1;
-	} else {
-		return 0;
-	}
-}
 
 function updateLeaderboard(data: number[]) {
+	// The server builds this list from players who have taken a spawn this round
+	// (Room.broadcastLeaderboard filters on firstReceive), so it doubles as the
+	// authoritative "who has actually played" set for the end-of-round scoreboard.
+	st.spawnedIndexes = data.slice();
+
 	let test: Node[] = [];
 	test.push(<span class="title">LEADERBOARD</span>);
 
@@ -1600,9 +1703,7 @@ function updateGameLoop() {
 	if (keys.l) {
 		horizontalDT = -1;
 	}
-	if (keys.s) {
-		doJump = 0;
-	}
+
 	// virtual stick (TouchControls) feeds analog axes straight in; clampMovementInput
 	// on the server already accepts any float in [-1, 1] here
 	if (touchMove.active) {
@@ -1659,17 +1760,7 @@ function updateGameLoop() {
 				plr.jumpY = Math.round(plr.jumpY);
 			}
 			if (plr.index === st.player.index && !st.gameOver) {
-				let sendData = {
-					hdt: b,
-					vdt: d,
-					ts: currentTime,
-					isn: inputNumber,
-					s: doJump,
-					delta,
-				};
-				inputNumber++;
-				thisInput.push(sendData);
-				socket.emit("4", sendData);
+				queueMovementInput(b, d, doJump, delta, currentTime);
 				if (userScroll !== 0 && !st.gameOver) {
 					playerSwapWeapon(plr, userScroll);
 					userScroll = 0;
@@ -1679,7 +1770,16 @@ function updateGameLoop() {
 				}
 				if (keys.lm && !st.gameOver && st.player.weapons.length > 0) {
 					const weapon = getCurrentWeapon(plr);
-					if (weapon && currentTime - weapon.lastShot >= weapon.fireRate) {
+					// The second condition mirrors the server's cross-weapon gate:
+					// each weapon keeps its own lastShot, so without it, switching
+					// weapons reset the cooldown and both fired at full rate. The
+					// swap above happens in this same frame, which is what made it
+					// so easy to do by accident on the scroll wheel.
+					if (
+						weapon &&
+						currentTime - weapon.lastShot >= weapon.fireRate &&
+						currentTime >= nextLocalShotAt
+					) {
 						shootBullet(plr);
 					}
 				}
@@ -1732,7 +1832,11 @@ function updateGameLoop() {
 			}
 		}
 	}
-	st.players.sort(sortUsersByPosition);
+	// (st.players used to be y-sorted in place here every frame. It is a $state
+	// proxy, so the sort's writes invalidated every effect reading it —
+	// GameStatsTable's $derived.by and the HUD bindings — 60-240 times a second.
+	// Nothing depended on the order: getGameObjectRenderData sorts its own render
+	// list by y anyway, and the scoreboard re-sorts by score.)
 	if (!st.kicked) {
 		if (st.gameOver) {
 			doGame(delta);
@@ -2193,6 +2297,8 @@ function shootBullet(source: Player) {
 	}
 	socket.emit("1", source.x, source.y, source.jumpY, target.f, target.d, currentTime);
 	sourceWep.lastShot = currentTime;
+	// carries the cooldown across a weapon switch, matching Room.consumeShot
+	nextLocalShotAt = currentTime + sourceWep.fireRate;
 	sourceWep.ammo--;
 	if (sourceWep.ammo <= 0) {
 		playerReload(source, true);
@@ -3448,7 +3554,11 @@ function drawBackground() {
 	);
 }
 function getCachedWall(tile: Tile) {
-	let cacheKey = `${tile.left}${tile.right}${tile.top}${tile.bottom}${tile.topLeft}${tile.topRight}${tile.bottomLeft}${tile.bottomRight}${tile.edgeTile}${tile.hasCollision}`;
+	let cacheKey = tile.wallCacheKey;
+	if (cacheKey === undefined) {
+		cacheKey = `${tile.left}${tile.right}${tile.top}${tile.bottom}${tile.topLeft}${tile.topRight}${tile.bottomLeft}${tile.bottomRight}${tile.edgeTile}${tile.hasCollision}`;
+		tile.wallCacheKey = cacheKey;
+	}
 
 	if (cachedWalls[cacheKey] === undefined && wallSprite?.isLoaded) {
 		let canvasElem = document.createElement("canvas");
@@ -3524,7 +3634,11 @@ function getCachedWall(tile: Tile) {
 }
 var tilesPerFloorTile = 8;
 function getCachedFloor(tile: Tile) {
-	let tmpIndex = `${tile.spriteIndex}${tile.left}${tile.right}${tile.top}${tile.bottom}${tile.topLeft}${tile.topRight}`;
+	let tmpIndex = tile.floorCacheKey;
+	if (tmpIndex === undefined) {
+		tmpIndex = `${tile.spriteIndex}${tile.left}${tile.right}${tile.top}${tile.bottom}${tile.topLeft}${tile.topRight}`;
+		tile.floorCacheKey = tmpIndex;
+	}
 	if (cachedFloors[tmpIndex] === undefined && sideWalkSprite != null && sideWalkSprite.isLoaded) {
 		let tmpCanvas = document.createElement("canvas");
 		let ctx = tmpCanvas.getContext("2d")!;

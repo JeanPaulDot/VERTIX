@@ -2,17 +2,17 @@
 	import { st } from "../state.svelte.ts";
 	import StatusMessage from "./common/StatusMessage.svelte";
 
-	let clanCreateName = $state("");
-	let clanJoinName = $state("");
-	let clanInviteUsername = $state("");
-	let clanChatUrl = $state("");
+	function openSocial(tab: "clans" | "profile") {
+		st.socialTab = tab;
+		if (tab === "profile") st.socialProfileUser = st.player.account?.username ?? null;
+		st.menuModal = "social";
+	}
 
 	// Clan panel visibility used to be driven imperatively from app.tsx, which
 	// captured these elements at module load — before this modal had ever been
 	// rendered — so the lookups were null, the handler threw, and the whole
 	// section stayed display:none forever. It's derived state now.
 	const inClan = $derived(!!st.player.account?.clan);
-	const isClanOwner = $derived(!!st.player.account?.isClanOwner);
 
 	// Edit-profile fields seed from the account and stay editable afterwards. The
 	// SAVE button's onclick was assigned in the same dead code path, so it never
@@ -106,40 +106,7 @@
 		window.location.href = "/api/auth/logout";
 	}
 
-	function startCreateClan() {
-		if (!clanCreateName) return;
-		st.socket?.emit("dbClanCreate", {
-			clanName: clanCreateName,
-		});
-		st.messages.clanDB = "Please Wait...";
-	}
-	function startJoinClan() {
-		if (!clanJoinName) return;
-		st.socket?.emit("dbClanJoin", {
-			clanKey: clanJoinName,
-		});
-		st.messages.clanDB = "Please Wait...";
-	}
-	function startInviteClan() {
-		if (!clanInviteUsername) return;
-		st.socket?.emit("dbClanInvite", {
-			userName: clanInviteUsername,
-		});
-		st.messages.clanInv = "Please Wait...";
-	}
-	function startKickFromClan() {
-		if (!clanInviteUsername) return;
-		st.socket?.emit("dbClanKick", {
-			userName: clanInviteUsername,
-		});
-		st.messages.clanInv = "Please Wait...";
-	}
-	function startSetClanChat() {
-		st.socket?.emit("dbClanChatURL", {
-			chUrl: clanChatUrl,
-		});
-		st.messages.clanCht = "Please Wait...";
-	}
+
 </script>
 <div id="accountWidget">
 	<!-- NOT LOGGED IN -->
@@ -174,106 +141,20 @@
 			<div><b>Kills: </b>{st.player.account?.kills ?? "..."}</div>
 			<div><b>Deaths: </b>{st.player.account?.deaths ?? "..."}</div>
 			<div><b>KD: </b>{st.player.account?.kd ?? "..."}</div>
-			<h3 id="clanHeader">{inClan ? `[${st.player.account.clan}] CLAN:` : "CLANS"}</h3>
-			<div id="clanSignUp" style:display={inClan ? "none" : "block"}>
-				<input
-					bind:value={clanCreateName}
-					class="menuTextInput"
-					placeholder="Clan Name"
-					id="clanNameInput"
-					maxlength="4"
-					style="width:70%;"
-				>
-				<button
-					type="button"
-					id="createClanButton"
-					class="smallMenuButton"
-					style="margin-left:5px;"
-					onclick={startCreateClan}
-				>
-					CREATE
-				</button>
-				<input
-					bind:value={clanJoinName}
-					class="menuTextInput"
-					placeholder="Clan Name"
-					id="clanKeyInput"
-					maxlength="4"
-					style="width:78%;"
-				>
-				<button
-					type="button"
-					id="joinClanButton"
-					class="smallMenuButton"
-					style="margin-left:5px;"
-					onclick={startJoinClan}
-				>
-					JOIN
-				</button>
-				<StatusMessage text={st.messages.clanDB} />
-			</div>
-			<div id="clanStats" style:display={inClan ? "block" : "none"}>
-				<div id="clanStatFounder"><b>Founder: </b>{st.clanData.founder ?? "..."}</div>
-				<div id="clanStatRank"><b>Rank: </b>{st.clanData.rank ?? "..."}</div>
-				<div id="clanStatKD"><b>Avg KD: </b>{st.clanData.kd ?? "..."}</div>
-				<div id="clanStatMembers">
-					<b>Roster: </b>
-					<br>
-					{st.clanData.members ?? "..."}
-				</div>
-				<div id="clanChatLink" style="margin-top:5px;">
-					{#if st.clanData.chatURL && typeof st.clanData.chatURL === "string"}
-						{@const chatURL = st.clanData.chatURL.startsWith("http") ? st.clanData.chatURL : `https://${st.clanData.chatURL}`}
-						<a target="_blank" href={chatURL} rel="noopener"> Clan Chat </a>
+			<!-- Clan management lives in the social hub's clans tab now; this stays a
+		     summary + entry point so the account modal stays about the account. -->
+			<div id="clanSummaryRow">
+				<span>
+					{#if inClan}
+						<b>[{st.player.account.clan}]</b>
+						· RNK {st.clanData.rank ?? "..."} · KDR {st.clanData.kd ?? "..."}
+					{:else}
+						<b>No clan</b>
 					{/if}
-				</div>
-				<div id="clanAdminPanel" style:display={isClanOwner ? "block" : "none"} style:margin-top="10px">
-					<input
-						bind:value={clanChatUrl}
-						class="menuTextInput"
-						placeholder="Clan Chat URL"
-						id="clanChatInput"
-						maxlength="50"
-						style="width:95%;"
-					>
-					<button
-						type="button"
-						id="setChatClanButton"
-						class="smallMenuButton"
-						style="margin-top:10px;"
-						onclick={startSetClanChat}
-					>
-						UPDATE
-					</button>
-					<StatusMessage text={st.messages.clanCht} inline />
-					<input
-						bind:value={clanInviteUsername}
-						class="menuTextInput"
-						placeholder="Username"
-						id="clanInviteInput"
-						maxlength="15"
-						style="width:95%;"
-					>
-					<button
-						type="button"
-						id="inviteClanButton"
-						class="smallMenuButton"
-						style="margin-top:10px;"
-						onclick={startInviteClan}
-					>
-						INVITE
-					</button>
-					<button
-						type="button"
-						id="kickClanButton"
-						class="smallMenuButton"
-						style="margin-left:5px;margin-top:10px;"
-						onclick={startKickFromClan}
-					>
-						KICK
-					</button>
-					<StatusMessage text={st.messages.clanInv} />
-				</div>
+				</span>
+				<button type="button" class="smallMenuButton" onclick={() => openSocial("clans")}>
+					{inClan ? "MANAGE" : "FIND"}
+				</button>
 			</div>
 			<div id="editAccount">
 				<h3 class="menuHeaderTabbed" style="margin-top:8px;">EDIT PROFILE</h3>
@@ -307,19 +188,9 @@
 		</button>
 		<button
 			type="button"
-			id="leaveClanButton"
-			onclick={() => st.socket?.emit("dbClanLeave")}
-			class="smallMenuButton"
-			style="margin-top:10px; margin-left:5px; margin-bottom:0px;"
-			style:display={inClan ? "inline-block" : "none"}
-		>
-			{isClanOwner ? "DELETE CLAN" : "LEAVE CLAN"}
-		</button>
-		<button
-			type="button"
 			class="smallMenuButton"
 			style="margin-top:10px; margin-bottom:0px; margin-left:5px;"
-			onclick={() => window.open(`/profile.html?${st.player.account.username}`, "_blank")}
+			onclick={() => openSocial("profile")}
 		>
 			PROFILE
 		</button>

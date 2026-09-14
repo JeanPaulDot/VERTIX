@@ -1,5 +1,6 @@
 import { PLAYER_SELECTABLE_CLASS_COUNT } from "core/src/loadouts.ts";
 import { camos, hats, shirts } from "core/src/skins.ts";
+import { containsBadWord } from "core/src/badWords.ts";
 
 const HTML_TAG_RE = /<[^>]*>/g;
 // control characters + DEL. Stripping these from anything we log or echo
@@ -19,6 +20,8 @@ export function sanitizeName(name: unknown): string {
 	if (typeof name !== "string") return "UNKNOWN";
 	const cleaned = name.replace(HTML_TAG_RE, "").replace(CONTROL_CHAR_RE, "").trim();
 	if (cleaned.length === 0) return "UNKNOWN";
+	// server-side enforcement of the same bad-word filter the client applies
+	if (containsBadWord(cleaned)) return "UNKNOWN";
 	return cleaned.substring(0, MAX_NAME_LENGTH);
 }
 

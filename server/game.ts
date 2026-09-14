@@ -1,6 +1,7 @@
 import { gameModes } from "core/src/gamemodes.ts";
 import { weapons } from "core/src/loadouts.ts";
 import { Projectile } from "core/src/logic/projectile.ts";
+import { chooseSpawn } from "core/src/logic/spawn.ts";
 import { sprays } from "core/src/sprays.ts";
 import type {
 	ClutterObject,
@@ -144,10 +145,7 @@ export class Game {
 		setupMap(tmpMap, this.tileScale, []);
 		for (const tl of this.tiles) {
 			if (!tl.hardPoint) {
-				if (
-					tl.objTeam === "red" ||
-					(tl.objTeam === "blue" && this.mode.teams)
-				) {
+				if (tl.objTeam === "red" || tl.objTeam === "blue") {
 					this.spawnTiles.push(tl);
 				}
 			} else if (this.mode.code === "hp" || this.mode.code === "zmtch") {
@@ -158,9 +156,23 @@ export class Game {
 	}
 
 	getSpawn(player: Player) {
-		const spawnTiles = this.mode.teams
+		const tileMid = this.tileScale / 2;
+		const teamTiles = this.mode.teams
 			? this.spawnTiles.filter((tile) => tile.objTeam === player.team)
 			: this.spawnTiles;
+		// a team mode on a map that only paints one colour still has to spawn everyone
+		const spawnTiles = teamTiles.length > 0 ? teamTiles : this.spawnTiles;
+
+		if (spawnTiles.length === 0) {
+			// No spawn tiles on this map. The old fallback was a fixed (tileMid, tileMid),
+			// which is near the top-left corner whatever the map size and is usually solid
+			// rock — the "spawned inside a wall" report. Any open tile is strictly better.
+			const openTile = this.tiles.find((tl) => !tl.wall && !tl.edgeTile);
+			return openTile
+				? { x: openTile.x + tileMid, y: openTile.y + tileMid }
+				: { x: tileMid, y: tileMid };
+		}
+
 		const activeEnemies = this.players.filter(
 			(plr) =>
 				!plr.dead &&
@@ -168,25 +180,22 @@ export class Game {
 				plr.index !== player.index &&
 				(!this.mode.teams || plr.team !== player.team),
 		);
-		const tileMid = this.tileScale / 2;
 
-		let bestSpawnPosition = { x: tileMid, y: tileMid };
-		let bestSpawnDistance = -Infinity;
-
-		for (const tl of spawnTiles) {
-			const spawnPosition = { x: tl.x + tileMid, y: tl.y + tileMid };
-			const closestEnemyDistance = Math.min(
-				...activeEnemies.map((plr) =>
-					getDistance(plr.x, plr.y, spawnPosition.x, spawnPosition.y),
-				),
-			);
-			if (closestEnemyDistance > bestSpawnDistance) {
-				bestSpawnPosition = spawnPosition;
-				bestSpawnDistance = closestEnemyDistance;
+		// Scanning from a random offset is what keeps a round start from stacking the
+		// whole lobby on one tile: immediately after newRound nobody is alive or on
+		// screen, so every candidate ties, and whichever one is examined first wins.
+		// It used to be tiles[0] every time (Math.min of an empty list is Infinity,
+		// and nothing can then beat Infinity), so everyone spawned on one square.
+		const candidates = spawnTiles.map((tl) => ({
+			x: tl.x + tileMid,
+			y: tl.y + tileMid,
+		}));
+		return (
+			chooseSpawn(candidates, activeEnemies, randomInt(0, candidates.length - 1)) ?? {
+				x: tileMid,
+				y: tileMid,
 			}
-		}
-
-		return bestSpawnPosition;
+		);
 	}
 
 	genClutter() {

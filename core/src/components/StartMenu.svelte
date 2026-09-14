@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { st } from "../state.svelte";
+	import StatusMessage from "./common/StatusMessage.svelte";
 
 	// ENTER GAME is available even with no room picked: startGame autojoins the
 	// best available room in that case. only block while a join is in flight.
@@ -15,6 +16,7 @@
 	bind:value={st.playerName}
 	onkeydown={(e) => {if (e.code === "Enter" && canStartGame) window.startGame()}}
 >
+<StatusMessage text={st.messages.name} kind="error" />
 <button type="button" id="startButton" onclick={() => { if (canStartGame) window.startGame() }}>
 	{st.changingLobby ? "JOINING..." : "ENTER GAME"}
 </button>
@@ -37,7 +39,14 @@
 	<button type="button" class="smallMenuButton" onclick={() => st.menuModal = "rooms"}>BROWSE ROOMS</button>
 </div>
 
-<button type="button" id="leaderButton" onclick={() => window.open("/leaderboards.html", "_blank")}>
+<button
+	type="button"
+	id="leaderButton"
+	onclick={() => {
+		st.socialTab = "leaderboards";
+		st.menuModal = "social";
+	}}
+>
 	LEADERBOARDS
 </button>
 

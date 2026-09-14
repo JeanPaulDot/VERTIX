@@ -11,6 +11,122 @@
 	--red: #d95151;
 	--setting-blue: #76b3e3;
 	--setting-active-blue: #6fa9d6;
+
+	/* Menu surfaces. These were hardcoded in half a dozen components; the tokens
+	   exist so the social hub and the admin panel read as the same product. */
+	--card-shadow: #e0e0e0;
+	--row-hover: #e6e6e6;
+	--row-inset: #f2f2f2;
+	--ink: rgba(0, 0, 0, 0.6);
+	--ink-soft: rgba(0, 0, 0, 0.4);
+	--ink-faint: rgba(0, 0, 0, 0.1);
+
+	/* --- Motion ---------------------------------------------------------
+	   One timing scale for the whole app, so the menu, the social hub and the
+	   admin panel move like one system instead of three. Durations climb by
+	   roughly 1.5x; the easings are the two the crate reel already proved out. */
+	--dur-fast: 120ms;
+	--dur-base: 190ms;
+	--dur-slow: 300ms;
+	--dur-entrance: 420ms;
+	/* decelerate: things arriving */
+	--ease-out: cubic-bezier(0.15, 0.85, 0.25, 1);
+	/* overshoot: things that should feel springy (buttons, reveals) */
+	--ease-pop: cubic-bezier(0.2, 1.5, 0.4, 1);
+	/* gap between staggered siblings */
+	--stagger: 65ms;
+}
+
+/* --- Shared motion ------------------------------------------------------- */
+
+@keyframes riseIn {
+	from {
+		opacity: 0;
+		transform: translateY(16px) scale(0.985);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+
+@keyframes dropIn {
+	from {
+		opacity: 0;
+		transform: translateY(-22px);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+
+@keyframes popIn {
+	from {
+		opacity: 0;
+		transform: scale(0.82);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1);
+	}
+}
+
+@keyframes fadeIn {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+/* A row that has just changed value. Used by the live leaderboard and the
+   social hub's presence list so a change reads as an event, not a repaint. */
+@keyframes flashHighlight {
+	0% {
+		background-color: rgba(118, 179, 227, 0.55);
+	}
+	100% {
+		background-color: transparent;
+	}
+}
+
+/**
+ * Staggered list entrance.
+ *
+ * Put `.staggerIn` on the container and every direct child animates in one
+ * after another. This generalises the trick the loading spinner has always
+ * used (`.cs-loader-inner label:nth-child(n)` with hand-written delays) so
+ * lists elsewhere do not have to repeat it.
+ */
+.staggerIn > * {
+	animation: riseIn var(--dur-entrance) var(--ease-out) both;
+}
+.staggerIn > *:nth-child(1) { animation-delay: calc(var(--stagger) * 0); }
+.staggerIn > *:nth-child(2) { animation-delay: calc(var(--stagger) * 1); }
+.staggerIn > *:nth-child(3) { animation-delay: calc(var(--stagger) * 2); }
+.staggerIn > *:nth-child(4) { animation-delay: calc(var(--stagger) * 3); }
+.staggerIn > *:nth-child(5) { animation-delay: calc(var(--stagger) * 4); }
+.staggerIn > *:nth-child(6) { animation-delay: calc(var(--stagger) * 5); }
+.staggerIn > *:nth-child(7) { animation-delay: calc(var(--stagger) * 6); }
+.staggerIn > *:nth-child(8) { animation-delay: calc(var(--stagger) * 7); }
+.staggerIn > *:nth-child(n + 9) { animation-delay: calc(var(--stagger) * 8); }
+
+/**
+ * Everything above is decoration. Someone who has asked their OS for less
+ * motion gets the same layout with none of it — the crate reel already does
+ * this, and every animation added since follows the same rule.
+ */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
 }
 
 * {
@@ -597,15 +713,6 @@ div {
 	animation: lol 3s 500ms infinite ease-in-out;
 }
 
-#escMenuWrapper {
-	display: none;
-	background: rgba(0, 0, 0, 0.5);
-	pointer-events: none;
-	z-index: 2;
-	width: 100%;
-	height: 100%;
-	position: absolute;
-}
 
 #startMenuWrapper {
 	pointer-events: none;
@@ -656,11 +763,21 @@ div {
 	background-color: var(--white);
 	box-sizing: border-box;
 	pointer-events: auto;
-	box-shadow: inset 0 -5px #e0e0e0;
+	box-shadow: inset 0 -5px var(--card-shadow);
 	display: flex;
 	flex-direction: column;
 	font-size: 16px;
-	color: rgba(0, 0, 0, 0.4);
+	color: var(--ink-soft);
+	/* the three cards deal themselves in left to right; the middle (play) card
+	   leads, because that is the one you came here to use */
+	animation: riseIn var(--dur-entrance) var(--ease-out) both;
+}
+#playCard { animation-delay: 0ms; }
+#rewardsCard { animation-delay: var(--stagger); }
+#loadoutCard { animation-delay: calc(var(--stagger) * 2); }
+
+#mainTitleText {
+	animation: dropIn var(--dur-slow) var(--ease-out) both;
 }
 #playCard {
 	flex-basis: 360px;
@@ -719,6 +836,7 @@ div {
 	position: absolute;
 	bottom: 0;
 	right: 0;
+	animation: fadeIn var(--dur-slow) var(--ease-out) calc(var(--stagger) * 3) both;
 }
 
 #discordButton {
@@ -738,6 +856,31 @@ div {
 #discordButton:hover {
 	background-color: #4752c4;
 	text-decoration: none;
+}
+
+#creditsBox {
+	z-index: 1000;
+	position: absolute;
+	bottom: 0;
+	left: 0;
+}
+
+#creditsLink {
+	display: block;
+	font-size: 12px;
+	color: rgba(255, 255, 255, 0.6);
+	background-color: rgba(0, 0, 0, 0.4);
+	border-radius: 0 4px 0 0;
+	padding: 6px 12px;
+	text-decoration: none;
+	transition:
+		color 0.15s,
+		background-color 0.15s;
+}
+
+#creditsLink:hover {
+	color: #fff;
+	background-color: rgba(0, 0, 0, 0.6);
 }
 
 .playerStatClick {
@@ -805,4 +948,383 @@ div {
 	#status {
 		display: none;
 	}
+}
+
+/* --- Social hub -----------------------------------------------------------
+   The social area used to be four separate documents styled by social.css: a
+   fixed 820px float layout in Arial with no pixel font, no responsive rules and
+   no motion. It lives inside the menu now and shares its vocabulary — the same
+   tokens, the same chunky inset-shadow buttons, the same timing scale. */
+
+.socialTabs {
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap;
+	margin-bottom: 14px;
+	border-bottom: 3px solid var(--card-shadow);
+	padding-bottom: 10px;
+}
+
+.socialTab {
+	flex: 1 1 auto;
+	min-width: 96px;
+	padding: 9px 14px;
+	font-size: 14px;
+	color: #969696;
+	background: var(--row-inset);
+	border: none;
+	border-radius: 1px;
+	cursor: pointer;
+	position: relative;
+	top: 0;
+	box-shadow: inset 0 -3px var(--card-shadow);
+	transition:
+		color var(--dur-fast) ease,
+		background-color var(--dur-fast) ease,
+		box-shadow var(--dur-fast) ease,
+		top var(--dur-fast) ease;
+}
+.socialTab:hover {
+	color: var(--ink);
+	background: var(--row-hover);
+}
+.socialTab.socialTabActive {
+	color: var(--white);
+	background: var(--setting-blue);
+	box-shadow: inset 0 -3px #4094d9;
+}
+.socialTab.socialTabActive:hover {
+	background: var(--setting-active-blue);
+}
+.socialTab:active {
+	top: 1px;
+	box-shadow: none;
+}
+
+/* the count chip on a tab — pops when the number changes */
+.socialTabCount {
+	display: inline-block;
+	margin-left: 6px;
+	padding: 0 5px;
+	font-size: 11px;
+	border-radius: 8px;
+	background: rgba(0, 0, 0, 0.12);
+	animation: popIn var(--dur-base) var(--ease-pop);
+}
+.socialTabActive .socialTabCount {
+	background: rgba(255, 255, 255, 0.28);
+}
+
+.socialPanel {
+	min-height: 260px;
+	max-height: min(56vh, 520px);
+	overflow-y: auto;
+	overflow-x: hidden;
+	padding-right: 4px;
+}
+
+.socialRow {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 9px 10px;
+	background: var(--row-inset);
+	margin-bottom: 4px;
+	border-radius: 1px;
+	color: var(--ink);
+	font-size: 14px;
+	text-decoration: none;
+	transition: background-color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out);
+}
+.socialRow:hover {
+	background: var(--row-hover);
+}
+/* only rows that go somewhere get the affordance */
+.socialRowLink {
+	cursor: pointer;
+}
+.socialRowLink:hover {
+	transform: translateX(3px);
+}
+
+.socialRowMain {
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+.socialRowName {
+	color: var(--ink);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.socialRowSub {
+	font-size: 11px;
+	color: #969696;
+}
+.socialRowMeta {
+	flex: none;
+	text-align: right;
+	font-size: 12px;
+	color: #969696;
+}
+
+/* rank position badge */
+.socialPos {
+	flex: none;
+	width: 30px;
+	text-align: right;
+	font-size: 13px;
+	color: #b0b0b0;
+}
+.socialPos1 { color: #ff8000; }
+.socialPos2 { color: #a0a0a0; }
+.socialPos3 { color: #b87333; }
+
+.socialMetric {
+	flex: none;
+	text-align: right;
+	min-width: 72px;
+}
+.socialMetricValue {
+	display: block;
+	font-size: 16px;
+	color: var(--setting-blue);
+}
+.socialMetricLabel {
+	display: block;
+	font-size: 10px;
+	color: #b0b0b0;
+}
+
+/* a row whose value just changed */
+.socialRowChanged {
+	animation: flashHighlight 900ms var(--ease-out);
+}
+
+.socialAvatar {
+	flex: none;
+	width: 32px;
+	height: 32px;
+	border-radius: 1px;
+	background: var(--card-shadow);
+	object-fit: cover;
+	image-rendering: auto;
+}
+
+/* pulsing dot for a player who is in a game right now */
+.socialOnlineDot {
+	flex: none;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: #4caf50;
+	box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7);
+	animation: onlinePulse 2s ease-out infinite;
+}
+@keyframes onlinePulse {
+	0% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.6); }
+	70% { box-shadow: 0 0 0 7px rgba(76, 175, 80, 0); }
+	100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); }
+}
+
+.socialEmpty {
+	padding: 34px 10px;
+	text-align: center;
+	color: #969696;
+	font-size: 14px;
+	animation: fadeIn var(--dur-slow) var(--ease-out) both;
+}
+
+.socialJoin {
+	flex: none;
+	padding: 5px 11px;
+	font-size: 12px;
+	color: var(--white);
+	background: var(--setting-blue);
+	border: none;
+	border-radius: 1px;
+	cursor: pointer;
+	position: relative;
+	box-shadow: inset 0 -3px var(--setting-active-blue);
+	transition: background-color var(--dur-fast) ease;
+}
+.socialJoin:hover {
+	background: var(--setting-active-blue);
+}
+.socialJoin:active {
+	top: 1px;
+	box-shadow: none;
+}
+
+.socialSearch {
+	width: 100%;
+	box-sizing: border-box;
+	margin-bottom: 10px;
+	padding: 8px 10px;
+	font-size: 14px;
+	color: var(--ink);
+	background: var(--row-inset);
+	border: 2px solid transparent;
+	border-radius: 1px;
+	outline: none;
+	transition: border-color var(--dur-base) ease, background-color var(--dur-base) ease;
+}
+.socialSearch:focus {
+	border-color: var(--setting-blue);
+	background: var(--white);
+}
+
+/* stat grid on the profile panel */
+.socialStats {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+	gap: 6px;
+	margin-bottom: 14px;
+}
+.socialStat {
+	padding: 10px 8px;
+	text-align: center;
+	background: var(--row-inset);
+	border-radius: 1px;
+	box-shadow: inset 0 -3px var(--card-shadow);
+	animation: popIn var(--dur-base) var(--ease-pop) both;
+}
+.socialStatValue {
+	display: block;
+	font-size: 19px;
+	color: var(--ink);
+}
+.socialStatLabel {
+	display: block;
+	margin-top: 3px;
+	font-size: 10px;
+	color: #969696;
+}
+
+@media (max-width: 600px) {
+	.socialPanel {
+		max-height: 60vh;
+	}
+	.socialTab {
+		min-width: 0;
+		padding: 9px 8px;
+		font-size: 12px;
+	}
+	.socialRow {
+		font-size: 12px;
+	}
+}
+
+/* --- Admin panel -------------------------------------------------------------
+   The admin dashboard (core/admin.html) reuses the social hub's tab and row
+   vocabulary plus these table/button/badge primitives. It is a separate page,
+   so nothing here can collide with the game's own layout. */
+
+.adminTable {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 13px;
+}
+.adminTable th {
+	padding: 6px 8px;
+	text-align: left;
+	font-size: 10px;
+	color: #969696;
+	text-transform: uppercase;
+	border-bottom: 2px solid var(--card-shadow);
+}
+.adminTable td {
+	padding: 7px 8px;
+	color: var(--ink);
+	border-bottom: 1px solid var(--card-shadow);
+	vertical-align: top;
+}
+
+.adminBtn {
+	padding: 8px 14px;
+	font-size: 13px;
+	color: var(--white);
+	background: var(--setting-blue);
+	border: none;
+	border-radius: 1px;
+	cursor: pointer;
+	position: relative;
+	box-shadow: inset 0 -3px #4094d9;
+	transition: background-color var(--dur-fast) ease;
+}
+.adminBtn:hover:not(:disabled) {
+	background: var(--setting-active-blue);
+}
+.adminBtn:active:not(:disabled) {
+	top: 1px;
+	box-shadow: none;
+}
+.adminBtn:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+.adminBtnSecondary {
+	background: var(--row-inset);
+	color: var(--ink);
+	box-shadow: inset 0 -3px var(--card-shadow);
+}
+.adminBtnSecondary:hover:not(:disabled) {
+	background: var(--row-hover);
+}
+.adminBtnDanger {
+	background: #c0504d;
+	box-shadow: inset 0 -3px #a03e3b;
+}
+.adminBtnDanger:hover:not(:disabled) {
+	background: #a03e3b;
+}
+.adminBtnTiny {
+	padding: 4px 9px;
+	font-size: 11px;
+}
+.adminBtnActive {
+	background: var(--setting-active-blue);
+}
+
+.adminInput {
+	flex: 1;
+	padding: 8px 10px;
+	font-size: 14px;
+	color: var(--ink);
+	background: var(--white);
+	border: 2px solid var(--card-shadow);
+	border-radius: 1px;
+	outline: none;
+}
+.adminInput:focus {
+	border-color: var(--setting-blue);
+}
+
+.adminBadge {
+	display: inline-block;
+	margin-left: 5px;
+	padding: 1px 6px;
+	font-size: 10px;
+	border-radius: 8px;
+	background: rgba(0, 0, 0, 0.12);
+	color: #969696;
+	vertical-align: middle;
+}
+.adminBadgeWarn {
+	background: rgba(224, 176, 74, 0.25);
+	color: #b8860b;
+}
+.adminBadgeDanger {
+	background: rgba(224, 99, 99, 0.25);
+	color: #c0504d;
+}
+
+.adminEmpty {
+	padding: 30px 10px;
+	text-align: center;
+	color: #969696;
+	font-size: 14px;
 }

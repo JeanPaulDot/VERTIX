@@ -4,7 +4,8 @@
 	"scripts": {
 		"dev": "node --watch --watch-preserve-output --env-file=../.env --import ./import-hooks.ts index.ts",
 		"start": "node --import ./import-hooks.ts index.ts",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"test": "node --test --import ./import-hooks.ts \"test/**/*.test.mjs\""
 	},
 	"dependencies": {
 		"@hono/node-server": "^2.1.1",

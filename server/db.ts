@@ -116,12 +116,80 @@ export function initDb(): void {
 			ip TEXT NOT NULL,
 			user_agent TEXT DEFAULT '',
 			room TEXT DEFAULT '',
+			mode TEXT DEFAULT '',
 			started_at INTEGER NOT NULL,
 			ended_at INTEGER,
 			duration_seconds INTEGER DEFAULT 0
 		);
 		CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_sessions_ip ON sessions(ip);
+		CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+		-- moderation: same shape for bans (cannot join at all) and mutes (cannot
+		-- chat). value is the userId as a string for kind='user', or the IP for
+		-- kind='ip'. expires_at NULL = permanent. Lifted rows stay for the audit
+		-- trail; lookups filter on active.
+		CREATE TABLE IF NOT EXISTS bans (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			kind TEXT NOT NULL CHECK (kind IN ('user', 'ip')),
+			value TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			issued_by TEXT NOT NULL DEFAULT '',
+			issued_at INTEGER NOT NULL,
+			expires_at INTEGER,
+			active INTEGER NOT NULL DEFAULT 1,
+			lifted_at INTEGER,
+			lifted_by TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_bans_subject ON bans(kind, value, active);
+
+		CREATE TABLE IF NOT EXISTS mutes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			kind TEXT NOT NULL CHECK (kind IN ('user', 'ip')),
+			value TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			issued_by TEXT NOT NULL DEFAULT '',
+			issued_at INTEGER NOT NULL,
+			expires_at INTEGER,
+			active INTEGER NOT NULL DEFAULT 1,
+			lifted_at INTEGER,
+			lifted_by TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_mutes_subject ON mutes(kind, value, active);
+
+		-- every mutating admin action writes a row here; the panel is read-only
+		-- history, so there is no delete/update path at all
+		CREATE TABLE IF NOT EXISTS admin_audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			actor TEXT NOT NULL,
+			action TEXT NOT NULL,
+			target TEXT NOT NULL DEFAULT '',
+			payload TEXT,
+			ip TEXT DEFAULT '',
+			created_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit(created_at DESC);
+
+		-- bounded chat history for abuse reports; pruned by analytics on write
+		CREATE TABLE IF NOT EXISTS chat_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			room TEXT NOT NULL DEFAULT '',
+			user_id INTEGER,
+			username TEXT NOT NULL DEFAULT '',
+			ip TEXT DEFAULT '',
+			message TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_chat_log_created ON chat_log(created_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_chat_log_room ON chat_log(room);
+
+		-- one row per minute from the concurrency sampler in index.ts
+		CREATE TABLE IF NOT EXISTS server_stats (
+			ts INTEGER PRIMARY KEY,
+			humans INTEGER NOT NULL,
+			bots INTEGER NOT NULL,
+			rooms INTEGER NOT NULL
+		);
 
 		CREATE TABLE IF NOT EXISTS user_activity (
 			user_id INTEGER PRIMARY KEY,
@@ -141,6 +209,19 @@ export function initDb(): void {
 			PRIMARY KEY (username, ip)
 		);
 		CREATE INDEX IF NOT EXISTS idx_user_ips_ip ON user_ips(ip);
+
+		-- Leaderboard ordering. getLeaderboard sorts player_stats by score/kills and
+		-- getWorldRank scans the whole table by score, both of which were full scans
+		-- plus a sort; these let SQLite walk the index and stop at LIMIT.
+		CREATE INDEX IF NOT EXISTS idx_player_stats_score ON player_stats(score DESC);
+		CREATE INDEX IF NOT EXISTS idx_player_stats_kills ON player_stats(kills DESC);
+		-- getUnopenedCrateCount / popOldestUnopenedCrate filter on both columns
+		CREATE INDEX IF NOT EXISTS idx_user_crates_user_open ON user_crates(user_id, opened_at);
+		-- clan ownership checks (findClanByName -> owner_id) and the clan leaderboard
+		CREATE INDEX IF NOT EXISTS idx_clans_owner ON clans(owner_id);
+		-- quest lookups are per user per period
+		CREATE INDEX IF NOT EXISTS idx_user_quests_user_period
+			ON user_quests(user_id, period_start);
 	`);
 
 	// Migration: add discord columns if missing
@@ -157,6 +238,19 @@ export function initDb(): void {
 	}
 	if (!colNames.includes("session_version")) {
 		db.exec("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0");
+	}
+	// role: player (default) | mod | admin — lets moderators act under their own
+	// Discord account instead of sharing the break-glass ADMIN_TOKEN
+	if (!colNames.includes("role")) {
+		db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'player'");
+	}
+	const bugColumns = db.prepare("PRAGMA table_info(bug_reports)").all() as { name: string }[];
+	if (!bugColumns.map((c) => c.name).includes("status")) {
+		db.exec("ALTER TABLE bug_reports ADD COLUMN status TEXT NOT NULL DEFAULT 'open'");
+	}
+	const sessionColumns = db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
+	if (!sessionColumns.map((c) => c.name).includes("mode")) {
+		db.exec("ALTER TABLE sessions ADD COLUMN mode TEXT DEFAULT ''");
 	}
 	// Create unique index on discord_id if it doesn't exist
 	const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_discord_id'").all();
@@ -193,6 +287,7 @@ export type UserRow = {
 	shirt_id: number;
 	channel: string;
 	session_version: number;
+	role: "player" | "mod" | "admin";
 	created_at: string;
 };
 
@@ -871,6 +966,314 @@ export function deleteBugReport(id: number): void {
 	getDb().prepare("DELETE FROM bug_reports WHERE id = ?").run(id);
 }
 
+/** Mark a bug report resolved instead of deleting it — reports are history too. */
+export function resolveBugReport(id: number): void {
+	getDb().prepare("UPDATE bug_reports SET status = 'resolved' WHERE id = ?").run(id);
+}
+
+// --- Moderation: bans & mutes ----------------------------------------------
+
+export type SanctionRow = {
+	id: number;
+	kind: "user" | "ip";
+	value: string;
+	reason: string;
+	issued_by: string;
+	issued_at: number;
+	expires_at: number | null;
+	active: number;
+	lifted_at: number | null;
+	lifted_by: string | null;
+};
+
+/** Sanctions joined with the username, when the subject is an account. */
+export type SanctionWithUser = SanctionRow & { username: string | null };
+
+function getActiveSanction(
+	table: "bans" | "mutes",
+	kind: "user" | "ip",
+	value: string,
+): SanctionRow | null {
+	return (
+		(getDb()
+			.prepare(
+				`SELECT * FROM ${table} WHERE kind = ? AND value = ? AND active = 1 AND (expires_at IS NULL OR expires_at > ?) ORDER BY issued_at DESC LIMIT 1`,
+			)
+			.get(kind, value, Date.now()) as SanctionRow | undefined) ?? null
+	);
+}
+
+export function getActiveBanForUser(userId: number): SanctionRow | null {
+	return getActiveSanction("bans", "user", String(userId));
+}
+
+export function getActiveBanForIp(ip: string): SanctionRow | null {
+	return getActiveSanction("bans", "ip", ip);
+}
+
+/** The ban that should block this join, if any — account first, then IP. */
+export function getActiveBanFor(userId: number | null, ip: string | null): SanctionRow | null {
+	if (userId != null) {
+		const ban = getActiveBanForUser(userId);
+		if (ban) return ban;
+	}
+	if (ip) return getActiveBanForIp(ip);
+	return null;
+}
+
+export function getActiveMuteFor(userId: number | null, ip: string | null): SanctionRow | null {
+	if (userId != null) {
+		const mute = getActiveSanction("mutes", "user", String(userId));
+		if (mute) return mute;
+	}
+	if (ip) return getActiveSanction("mutes", "ip", ip);
+	return null;
+}
+
+function issueSanction(
+	table: "bans" | "mutes",
+	sanction: { kind: "user" | "ip"; value: string; reason: string; issuedBy: string; expiresAt: number | null },
+): void {
+	const now = Date.now();
+	const run = getDb().transaction(() => {
+		// deactivate any previous active sanction on the same subject so the list
+		// shows one live row per subject rather than a stack of superseded ones
+		getDb()
+			.prepare(
+				`UPDATE ${table} SET active = 0, lifted_at = ?, lifted_by = 'superseded' WHERE kind = ? AND value = ? AND active = 1`,
+			)
+			.run(now, sanction.kind, sanction.value);
+		getDb()
+			.prepare(
+				`INSERT INTO ${table} (kind, value, reason, issued_by, issued_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				sanction.kind,
+				sanction.value,
+				sanction.reason,
+				sanction.issuedBy,
+				now,
+				sanction.expiresAt,
+			);
+	});
+	run();
+}
+
+export function issueBan(sanction: {
+	kind: "user" | "ip";
+	value: string;
+	reason: string;
+	issuedBy: string;
+	expiresAt: number | null;
+}): void {
+	issueSanction("bans", sanction);
+}
+
+export function issueMute(sanction: {
+	kind: "user" | "ip";
+	value: string;
+	reason: string;
+	issuedBy: string;
+	expiresAt: number | null;
+}): void {
+	issueSanction("mutes", sanction);
+}
+
+function liftSanction(table: "bans" | "mutes", kind: "user" | "ip", value: string, by: string): boolean {
+	const result = getDb()
+		.prepare(
+			`UPDATE ${table} SET active = 0, lifted_at = ?, lifted_by = ? WHERE kind = ? AND value = ? AND active = 1`,
+		)
+		.run(Date.now(), by, kind, value);
+	return result.changes > 0;
+}
+
+export function liftBan(kind: "user" | "ip", value: string, by: string): boolean {
+	return liftSanction("bans", kind, value, by);
+}
+
+export function liftMute(kind: "user" | "ip", value: string, by: string): boolean {
+	return liftSanction("mutes", kind, value, by);
+}
+
+function listActiveSanctions(table: "bans" | "mutes"): SanctionWithUser[] {
+	return getDb()
+		.prepare(
+			`SELECT s.*, u.username FROM ${table} s
+				LEFT JOIN users u ON s.kind = 'user' AND u.id = CAST(s.value AS INTEGER)
+				WHERE s.active = 1 ORDER BY s.issued_at DESC LIMIT 500`,
+		)
+		.all() as SanctionWithUser[];
+}
+
+export function listActiveBans(): SanctionWithUser[] {
+	return listActiveSanctions("bans");
+}
+
+export function listActiveMutes(): SanctionWithUser[] {
+	return listActiveSanctions("mutes");
+}
+
+// --- Roles ------------------------------------------------------------------
+
+export function getUserRole(userId: number): "player" | "mod" | "admin" {
+	const row = getDb().prepare("SELECT role FROM users WHERE id = ?").get(userId) as
+		| { role: string }
+		| undefined;
+	if (row?.role === "mod" || row?.role === "admin") return row.role;
+	return "player";
+}
+
+export function setUserRole(userId: number, role: "player" | "mod" | "admin"): void {
+	getDb().prepare("UPDATE users SET role = ? WHERE id = ?").run(role, userId);
+}
+
+// --- Admin audit -------------------------------------------------------------
+
+export function writeAudit(entry: {
+	actor: string;
+	action: string;
+	target: string;
+	payload?: string;
+	ip: string;
+}): void {
+	getDb()
+		.prepare(
+			"INSERT INTO admin_audit (actor, action, target, payload, ip, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		)
+		.run(entry.actor, entry.action, entry.target, entry.payload ?? null, entry.ip, Date.now());
+}
+
+export function getRecentAudit(limit: number, offset: number): unknown[] {
+	return getDb()
+		.prepare("SELECT * FROM admin_audit ORDER BY id DESC LIMIT ? OFFSET ?")
+		.all(limit, offset);
+}
+
+export function getAuditCount(): number {
+	return (getDb().prepare("SELECT COUNT(*) AS n FROM admin_audit").get() as { n: number }).n;
+}
+
+// --- Chat log (bounded moderation history) -----------------------------------
+
+export function writeChatRow(row: {
+	room: string;
+	userId: number | null;
+	username: string;
+	ip: string;
+	message: string;
+	at: number;
+}): void {
+	getDb()
+		.prepare(
+			"INSERT INTO chat_log (room, user_id, username, ip, message, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		)
+		.run(row.room, row.userId, row.username, row.ip, row.message, row.at);
+}
+
+export function getRecentChat(limit: number, room?: string): unknown[] {
+	if (room) {
+		return getDb()
+			.prepare("SELECT * FROM chat_log WHERE room = ? ORDER BY id DESC LIMIT ?")
+			.all(room, limit);
+	}
+	return getDb().prepare("SELECT * FROM chat_log ORDER BY id DESC LIMIT ?").all(limit);
+}
+
+export function pruneChatLog(olderThanMs: number): void {
+	getDb().prepare("DELETE FROM chat_log WHERE created_at < ?").run(Date.now() - olderThanMs);
+}
+
+// --- Server stats (concurrency sampler) ---------------------------------------
+
+export function writeServerStat(ts: number, humans: number, bots: number, roomCount: number): void {
+	getDb()
+		.prepare(
+			"INSERT OR REPLACE INTO server_stats (ts, humans, bots, rooms) VALUES (?, ?, ?, ?)",
+		)
+		.run(ts, humans, bots, roomCount);
+}
+
+export function getServerStatsSince(ts: number): { ts: number; humans: number; bots: number; rooms: number }[] {
+	return getDb()
+		.prepare("SELECT * FROM server_stats WHERE ts >= ? ORDER BY ts ASC")
+		.all(ts) as { ts: number; humans: number; bots: number; rooms: number }[];
+}
+
+export function pruneServerStats(olderThanMs: number): void {
+	getDb().prepare("DELETE FROM server_stats WHERE ts < ?").run(Date.now() - olderThanMs);
+}
+
+// --- Admin analytics aggregates ----------------------------------------------
+
+/** distinct signed-in players per UTC day for the last `days` days */
+export function getDailyActiveUsers(days: number): { day: string; users: number }[] {
+	const rows = getDb()
+		.prepare(
+			"SELECT (started_at / 86400000) AS bucket, COUNT(DISTINCT user_id) AS users FROM sessions WHERE user_id IS NOT NULL AND started_at >= ? GROUP BY bucket",
+			)
+		.all(Date.now() - days * 86_400_000) as { bucket: number; users: number }[];
+	const byBucket = new Map(rows.map((r) => [Number(r.bucket), r.users]));
+	// fill gaps so the chart shows quiet days as zero rather than skipping them
+	const out: { day: string; users: number }[] = [];
+	const todayBucket = Math.floor(Date.now() / 86_400_000);
+	for (let i = days - 1; i >= 0; i--) {
+		const bucket = todayBucket - i;
+		const date = new Date(bucket * 86_400_000).toISOString().slice(0, 10);
+		out.push({ day: date, users: byBucket.get(bucket) ?? 0 });
+	}
+	return out;
+}
+
+export function getModePopularity(): { mode: string; sessions: number }[] {
+	return getDb()
+		.prepare(
+			"SELECT mode, COUNT(*) AS sessions FROM sessions WHERE mode IS NOT NULL AND mode != '' GROUP BY mode ORDER BY sessions DESC LIMIT 20",
+		)
+		.all() as { mode: string; sessions: number }[];
+}
+
+export function getCrateSources(): { source: string; count: number }[] {
+	return getDb()
+		.prepare("SELECT source, COUNT(*) AS count FROM user_crates GROUP BY source ORDER BY count DESC LIMIT 20")
+		.all() as { source: string; count: number }[];
+}
+
+export function getQuestCompletion(): { total: number; claimed: number } {
+	const row = getDb()
+		.prepare("SELECT COUNT(*) AS total, COALESCE(SUM(claimed), 0) AS claimed FROM user_quests WHERE quest_type = 'daily'")
+		.get() as { total: number; claimed: number };
+	return row;
+}
+
+/** share of accounts whose first week is over that came back after it */
+export function getRetention(): { eligible: number; retained: number } {
+	const weekMs = 7 * 86_400_000;
+	return getDb()
+		.prepare(
+			"SELECT COUNT(*) AS eligible, COALESCE(SUM(CASE WHEN last_seen - first_seen >= ? THEN 1 ELSE 0 END), 0) AS retained FROM user_activity WHERE first_seen <= ?",
+		)
+		.get(weekMs, Date.now() - weekMs) as { eligible: number; retained: number };
+}
+
+export function deleteUnlock(userId: number, itemType: string, itemId: number): void {
+	getDb()
+		.prepare("DELETE FROM user_unlocks WHERE user_id = ? AND item_type = ? AND item_id = ?")
+		.run(userId, itemType, itemId);
+}
+
+export function resetStats(userId: number): void {
+	getDb()
+		.prepare(
+			"UPDATE player_stats SET score = 0, kills = 0, deaths = 0, total_damage = 0, total_healing = 0, total_goals = 0, likes = 0 WHERE user_id = ?",
+		)
+		.run(userId);
+}
+
+export function setScore(userId: number, score: number): void {
+	getDb().prepare("UPDATE player_stats SET score = ? WHERE user_id = ?").run(score, userId);
+}
+
 // --- Admin / analytics queries ---
 
 export type AdminUserRow = {
@@ -879,6 +1282,7 @@ export type AdminUserRow = {
 	discord_username: string;
 	discord_avatar: string;
 	created_at: string;
+	role: "player" | "mod" | "admin";
 	score: number;
 	kills: number;
 	deaths: number;
@@ -908,7 +1312,7 @@ export function getAdminUsers(limit: number, offset: number, search?: string): A
 	params.push(limit, offset);
 	return getDb()
 		.prepare(
-			`SELECT u.id, u.username, u.discord_username, u.discord_avatar, u.created_at,
+			`SELECT u.id, u.username, u.discord_username, u.discord_avatar, u.created_at, u.role,
 					COALESCE(ps.score, 0) AS score, COALESCE(ps.kills, 0) AS kills,
 					COALESCE(ps.deaths, 0) AS deaths, COALESCE(ps.total_damage, 0) AS total_damage,
 					COALESCE(ua.first_seen, 0) AS first_seen, COALESCE(ua.last_seen, 0) AS last_seen,
@@ -961,7 +1365,7 @@ export function getIpsForUsername(username: string): { ip: string; first_seen: n
 export function getAdminUserById(id: number): AdminUserRow | undefined {
 	return getDb()
 		.prepare(
-			`SELECT u.id, u.username, u.discord_username, u.discord_avatar, u.created_at,
+			`SELECT u.id, u.username, u.discord_username, u.discord_avatar, u.created_at, u.role,
 					COALESCE(ps.score, 0) AS score, COALESCE(ps.kills, 0) AS kills,
 					COALESCE(ps.deaths, 0) AS deaths, COALESCE(ps.total_damage, 0) AS total_damage,
 					COALESCE(ua.first_seen, 0) AS first_seen, COALESCE(ua.last_seen, 0) AS last_seen,

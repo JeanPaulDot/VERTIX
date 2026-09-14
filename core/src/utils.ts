@@ -214,7 +214,10 @@ export function setupMap(gameMap: any, mapTileScale: number, flags: FlagObject[]
 					}
 				} else if (colorKey === "255 0 0") {
 					newTile.objTeam = "red";
-				} else if (colorKey === "0 0 255" && gameMap.gameMode.teams) {
+				} else if (colorKey === "0 0 255") {
+					// Marked in every mode. Gating this on `teams` meant non-team modes
+					// saw no blue tiles at all, so the whole FFA spawn pool was the red
+					// half of the map. Team filtering happens in Game.getSpawn instead.
 					newTile.objTeam = "blue";
 				}
 			}

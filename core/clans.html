@@ -2,10 +2,11 @@
 <html lang="en">
 	<head>
 		<meta charset="UTF-8">
-		<title>Vertix Social</title>
-		<link rel="stylesheet" href="./assets/social.css">
+		<title>Vertix — Clans</title>
 		<link rel="shortcut icon" type="image/png" href="./assets/favicon.png">
-		<script src="./src/clans.ts" type="module"></script>
+		<!-- Retired standalone page: forwards into the SPA's social hub.
+		     External script because the production CSP blocks inline scripts. -->
+		<script src="/social-redirect.js" data-social-tab="clans" defer></script>
 	</head>
 	<body></body>
 </html>

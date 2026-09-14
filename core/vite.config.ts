@@ -11,6 +11,7 @@ export default {
 		rollupOptions: {
 			input: {
 				main: fileURLToPath(new URL("./index.html", import.meta.url)),
+				admin: fileURLToPath(new URL("./admin.html", import.meta.url)),
 				leaderboards: fileURLToPath(new URL("./leaderboards.html", import.meta.url)),
 				profile: fileURLToPath(new URL("./profile.html", import.meta.url)),
 				clans: fileURLToPath(new URL("./clans.html", import.meta.url)),

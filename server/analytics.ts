@@ -25,15 +25,29 @@ type AnalyticsEvent =
 			ip: string;
 			userAgent: string;
 			room: string;
+			mode: string;
 			startedAt: number;
-	  }
+		  }
 	| {
 			type: "session_end";
 			id: string;
 			userId: number | null;
 			endedAt: number;
 			durationSeconds: number;
-	  };
+		  }
+	| {
+			type: "chat";
+			room: string;
+			userId: number | null;
+			username: string;
+			ip: string;
+			message: string;
+			at: number;
+		  };
+
+// chat history is for investigating abuse reports, not an archive — anything
+// older than this is deleted as it is written
+const CHAT_RETENTION_MS = 7 * 24 * 60 * 60_000;
 
 const queue: AnalyticsEvent[] = [];
 let flushScheduled = false;
@@ -54,6 +68,10 @@ function flush(): void {
 		const db = getDb();
 		db.transaction(() => {
 			for (const event of batch) write(db, event);
+			// piggyback the retention prune on batches that actually grew the log
+			if (batch.some((e) => e.type === "chat")) {
+				db.prepare("DELETE FROM chat_log WHERE created_at < ?").run(Date.now() - CHAT_RETENTION_MS);
+			}
 		})();
 	} catch (err) {
 		log.error("analytics", `flush failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -63,8 +81,8 @@ function flush(): void {
 function write(db: ReturnType<typeof getDb>, event: AnalyticsEvent): void {
 	if (event.type === "session_start") {
 		db.prepare(
-			"INSERT OR IGNORE INTO sessions (id, user_id, username, ip, user_agent, room, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		).run(event.id, event.userId, event.username, event.ip, event.userAgent, event.room, event.startedAt);
+			"INSERT OR IGNORE INTO sessions (id, user_id, username, ip, user_agent, room, mode, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		).run(event.id, event.userId, event.username, event.ip, event.userAgent, event.room, event.mode, event.startedAt);
 
 		db.prepare(
 			"INSERT INTO user_ips (username, ip, first_seen, last_seen, count) VALUES (?, ?, ?, ?, 1) ON CONFLICT(username, ip) DO UPDATE SET last_seen = excluded.last_seen, count = count + 1",
@@ -88,6 +106,10 @@ function write(db: ReturnType<typeof getDb>, event: AnalyticsEvent): void {
 				event.userId,
 			);
 		}
+	} else if (event.type === "chat") {
+		db.prepare(
+			"INSERT INTO chat_log (room, user_id, username, ip, message, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		).run(event.room, event.userId, event.username, event.ip, event.message, event.at);
 	}
 }
 
@@ -98,6 +120,7 @@ export function trackSessionStart(opts: {
 	ip: string;
 	userAgent: string;
 	room: string;
+	mode: string;
 	startedAt: number;
 }): void {
 	queue.push({ type: "session_start", ...opts });
@@ -117,4 +140,17 @@ export function trackSessionEnd(opts: {
 /** Synchronously drains any queued events — called once on shutdown. */
 export function flushAnalytics(): void {
 	flush();
+}
+
+/** Chat history for abuse investigation; queued like everything else. */
+export function trackChat(opts: {
+	room: string;
+	userId: number | null;
+	username: string;
+	ip: string;
+	message: string;
+	at: number;
+}): void {
+	queue.push({ type: "chat", ...opts });
+	scheduleFlush();
 }

@@ -156,6 +156,13 @@ export function particleCone(
 	scale: number,
 	spriteIndex: number,
 	addBulletHole: boolean,
+	/**
+	 * Which particle layer the bullet hole lands on. Layer 0 draws after the wall
+	 * front faces but before clutter, which is right for a hole in a wall and
+	 * wrong for one in a barrel — those were being drawn on the floor *behind*
+	 * the barrel that stopped the bullet. Clutter hits pass 1.
+	 */
+	bulletHoleLayer = 0,
 ) {
 	if (!st.settings.showParticles) return;
 	for (let i = 0; i < count; ++i) {
@@ -175,7 +182,7 @@ export function particleCone(
 		tmpParticle.duration = 0;
 		if (i === 0 && spriteIndex === 2 && addBulletHole) {
 			tmpParticle.spriteIndex = 3;
-			tmpParticle.layer = 0;
+			tmpParticle.layer = bulletHoleLayer;
 		} else {
 			tmpParticle.dir = dir + randomFloat(-spread, spread);
 			tmpParticle.initScale = scale * randomFloat(1.5, 1.8);
