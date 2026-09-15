@@ -659,6 +659,12 @@ if (process.env.NODE_ENV === "production") {
 	app.get("/*", (c) => {
 		const urlPath = new URL(c.req.url).pathname;
 		let filePath = path.join(distDir, urlPath === "/" ? "index.html" : urlPath);
+		// Extensionless paths map to their .html file when one exists — /admin is
+		// built as admin.html, and the old explicit /admin route served it without
+		// the suffix, so shared links keep working.
+		if (!path.extname(filePath) && fs.existsSync(filePath + ".html")) {
+			filePath += ".html";
+		}
 		// containment check: never serve a file resolved outside distDir (defense in
 		// depth — URL parsing already collapses `..`, but this makes it explicit)
 		const inDist = path.resolve(filePath).startsWith(path.resolve(distDir) + path.sep);
